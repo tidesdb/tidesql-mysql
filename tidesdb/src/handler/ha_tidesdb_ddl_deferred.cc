@@ -135,12 +135,18 @@ static bool tdb_ddl_write(THD *thd, const uint8_t *key, size_t key_len, const st
 /* What this statement wrote, so the hook afterwards knows which records to look for.  A rolled-back
    CREATE takes its record down with the transaction, so the intent to undo it survives only here --
    which is why the list is kept rather than the hook simply scanning what is in storage. */
-struct tdb_ddl_pending_t
+/**
+ * tdb_ddl_pending_for
+ * the list of records this connection's current statement wrote
+ * @param thd the session
+ * @return the list, or NULL when the connection has no engine transaction yet
+ */
+static std::vector<std::pair<std::string, std::string>> *tdb_ddl_pending_for(THD *thd)
 {
-    std::string key;
-    ddl_log::record rec;
-};
-static thread_local std::vector<tdb_ddl_pending_t> tdb_ddl_stmt_records;
+    if (!thd) return nullptr;
+    tidesdb_trx_t *trx = (tidesdb_trx_t *)thd_get_ha_data(thd, tidesdb_hton);
+    return trx ? &trx->ddl_pending : nullptr;
+}
 
 /**
  * tdb_ddl_erase
@@ -191,7 +197,10 @@ static bool tdb_ddl_record(THD *thd, const char *path, ddl_log::intent what)
 
     if (!tdb_ddl_write(thd, key, key_len, value)) return false;
 
-    tdb_ddl_stmt_records.push_back({std::string((const char *)key, key_len), std::move(rec)});
+    /* tdb_ddl_write opened the transaction this hangs off, so the list is reachable now. */
+    auto *pending = tdb_ddl_pending_for(thd);
+    if (!pending) return false;
+    pending->emplace_back(std::string((const char *)key, key_len), std::move(value));
     return true;
 }
 
@@ -369,12 +378,18 @@ static void tdb_ddl_post_ddl(THD *thd)
     /* This statement's own records.  Whether each reached storage is the statement's verdict: the
        server committed or rolled back the transaction they were written through, so the record is
        there exactly when the schema change is. */
-    std::vector<tdb_ddl_pending_t> mine;
-    mine.swap(tdb_ddl_stmt_records);
+    auto *pending = tdb_ddl_pending_for(thd);
+    if (!pending || pending->empty()) return;
+
+    std::vector<std::pair<std::string, std::string>> mine;
+    mine.swap(*pending);
     for (const auto &p : mine)
     {
-        const uint8_t *k = (const uint8_t *)p.key.data();
-        tdb_ddl_resolve(k, p.key.size(), p.rec, tdb_ddl_record_survived(k, p.key.size()));
+        ddl_log::record rec;
+        if (!ddl_log::decode_record((const uint8_t *)p.second.data(), p.second.size(), &rec))
+            continue;
+        const uint8_t *k = (const uint8_t *)p.first.data();
+        tdb_ddl_resolve(k, p.first.size(), rec, tdb_ddl_record_survived(k, p.first.size()));
     }
 }
 

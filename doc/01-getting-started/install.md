@@ -90,6 +90,21 @@ cd build/mysql-test
 ./mtr --suite=tidesdb --parallel=4
 ```
 
+On Windows that needs one more flag. With no `--plugin-dir` the server looks in
+`<basedir>/lib/plugin`, and on a build tree that directory only exists on Unix — MySQL's own
+`CMakeLists.txt` links it to `plugin_output_directory` under `IF(UNIX AND BUILD_IS_SINGLE_CONFIG)`
+and does nothing otherwise. Visual Studio also writes one directory deeper, under the configuration
+name. So point the server at the plugins, MySQL's own components included:
+
+```bash
+perl mysql-test-run.pl --suite=tidesdb --parallel=4 \
+  --mysqld=--plugin-dir=C:/path/to/build/plugin_output_directory/RelWithDebInfo
+```
+
+`libtidesdb.dll` and the compression DLLs it links have to be on `PATH` as well, or the plugin
+fails to load with `errno: 126` even though the file is there — on Windows that error means either
+the library or something it depends on could not be found.
+
 That leaves the plugin in the build's plugin output directory. Copy it into the server's
 `plugin_dir`, or point `plugin_dir` at the build output while developing. Visual Studio is a
 multi-configuration generator, so on Windows the file is one level deeper, under the configuration

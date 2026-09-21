@@ -30,9 +30,10 @@
      4. a MySQL behaviour worth recording next to the macro that depends on it, so the reason
         survives the next person to read it
 
-   the file carries no preprocessor branches of its own.  the plugin targets MySQL only; where a
-   MySQL release changes something under the engine, the seam is a version test at the macro that
-   needs it rather than a branch wrapping engine code. */
+   the plugin targets MySQL only, so where a MySQL release changes something under the engine the
+   seam is a version test at the macro that needs it rather than a branch wrapping engine code.
+   there is one platform branch, at the end of the file: keeping the module mapped is something
+   only Windows needs, and rule 6 is why it lives here rather than at the call. */
 
 /* ******************** server version ******************** */
 
@@ -743,5 +744,47 @@ typedef std::ptrdiff_t my_ptrdiff_t;
     {                                                                   \
         return MAX_KEY_LENGTH;                                          \
     }
+
+/* ******************** keeping the module mapped ******************** */
+
+/* The one platform branch in this file, and rule 6 is why it is here rather than at the call.
+ *
+ * The linked TidesDB library keeps one thread-local key for the life of the database.  On Windows
+ * its shim allocates that key with FlsAlloc, which takes a callback to run when a thread exits,
+ * and the library is linked into this plugin rather than loaded beside it -- only tidesdb.lib is
+ * installed, there is no DLL -- so that callback's code lives inside ha_tidesdb.dll.  Nothing
+ * frees the key, which the shim says plainly: the key "lives for the process".
+ *
+ * That holds for anything that keeps the library loaded until it exits.  MySQL does not.
+ * plugin_shutdown (sql_plugin.cc) reaches dlclose, which my_sharedlib.h defines as FreeLibrary, and
+ * only afterwards does mysqld_exit call exit().  So the module is gone before the C runtime walks
+ * the fiber-local list at ExitProcess, and RtlProcessFlsData calls an address that is no longer
+ * mapped: mysqld dies with an access violation after every statement has already run.  The suite
+ * shows it exactly -- of the nine tests that restart the server, the eight that shut it down
+ * cleanly failed and crash_recovery, which kills it instead and so never runs exit(), passed.
+ *
+ * Pinning the module leaves it mapped for the life of the process, which is the assumption the
+ * library already makes about itself, and the callback stays valid.  UNINSTALL PLUGIN still
+ * unloads the engine as far as the server is concerned; only the code stays resident.
+ *
+ * It is the plugin's to fix because the key is file-static in the library and cannot be reached
+ * from here.  Were the library to free its key on close, this could go. */
+#ifdef _WIN32
+#include <windows.h>
+#define TDB_PIN_PLUGIN_MODULE()                                                          \
+    do                                                                                   \
+    {                                                                                    \
+        HMODULE tdb_self_ = NULL;                                                        \
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN |                          \
+                                    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,              \
+                                reinterpret_cast<LPCWSTR>(&tidesdb_hton), &tdb_self_))   \
+            sql_print_warning(                                                           \
+                "[TIDESDB] could not pin the plugin module (error %lu); the server may " \
+                "fault while exiting",                                                   \
+                GetLastError());                                                         \
+    } while (0)
+#else
+#define TDB_PIN_PLUGIN_MODULE() ((void)0)
+#endif
 
 #endif

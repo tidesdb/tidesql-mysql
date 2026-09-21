@@ -654,6 +654,13 @@ static int tidesdb_init_func(void *p)
 {
     DBUG_ENTER("tidesdb_init_func");
 
+    /* First, and on every path: the linked library registers a thread-exit callback that lives in
+       this module, and the server unloads the module before the process exits.  See
+       TDB_PIN_PLUGIN_MODULE for what that costs and why the plugin is what has to deal with it.
+       Nothing below depends on it, so it happens here rather than somewhere an early return could
+       skip. */
+    TDB_PIN_PLUGIN_MODULE();
+
     tidesdb_hton = (handlerton *)p;
     tidesdb_hton->create = tidesdb_create_handler;
     /* Where the server hands the engine its foreign-key definitions, the engine advertises that it

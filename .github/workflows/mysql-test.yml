@@ -101,6 +101,13 @@ jobs:
           choco install -y winflexbison3 ninja
           vcpkg install zstd:x64-windows lz4:x64-windows snappy:x64-windows openssl:x64-windows
 
+      # The Unix jobs cache ccache; this is the same idea for MSVC.  It hooks in through
+      # CMAKE_<LANG>_COMPILER_LAUNCHER, which Ninja honours and MSBuild does not, so it
+      # only works alongside the Ninja generator the build step uses.
+      - name: Set up sccache (Windows)
+        if: runner.os == 'Windows'
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Configure ccache (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -256,11 +263,71 @@ jobs:
             || { echo "applink.c missing from the OpenSSL prefix"; exit 1; }
           echo "SSLDIR=$SSLDIR" >> "$GITHUB_ENV"
 
-          cmake -S mysql-server -B mysql-server/build -G "Visual Studio 17 2022" -A x64 \
+          # Ninja rather than the Visual Studio generator, which is what sccache needs:
+          # it hooks in through CMAKE_<LANG>_COMPILER_LAUNCHER, and MSBuild does not
+          # honour that.  Ninja needs the MSVC environment, which this shell does not
+          # have, so vcvars is run and the environment it produces is imported.
+          #
+          # vswhere reports where Visual Studio actually is, rather than this guessing an
+          # edition and breaking when the image changes.
+          VSWHERE="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          # Both vswhere and cmd write CRLF, and a trailing \r on a path or on INCLUDE
+          # and LIB breaks every compile that uses them, so it is stripped at the source.
+          VSPATH="$("$VSWHERE" -latest -products '*' \
+                    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 \
+                    -property installationPath | tr -d '\r')"
+          test -n "$VSPATH" || { echo "no Visual Studio with the C++ toolchain found"; exit 1; }
+
+          # The call goes in a batch file rather than on cmd's command line.  Inline, the
+          # path has to survive quoting by bash and then MSYS's translation of arguments
+          # bound for a native program, and MSYS hands the escaped quotes to cmd as
+          # written -- cmd answers that '\"C:\Program Files\...\"' is not a recognised
+          # command.  A file needs no quoting, and printf writes the path without bash
+          # getting a second look at its backslashes.
+          {
+            echo '@echo off'
+            printf 'call "%s\\VC\\Auxiliary\\Build\\vcvars64.bat" >nul\n' "$VSPATH"
+            echo 'set'
+          } > vcenv.bat
+          cmd //c vcenv.bat | tr -d '\r' > vcenv.txt
+          grep -qiE '^INCLUDE=' vcenv.txt \
+            || { echo "vcvars produced no environment; the batch file was:"; cat vcenv.bat; exit 1; }
+          # Everything except PATH can be exported as-is.  PATH cannot: vcvars writes it
+          # in Windows form, and putting that into this shell's PATH loses every Unix
+          # tool the rest of the job runs.  cygpath converts the list instead.
+          while IFS='=' read -r key val; do
+            case "$key" in
+              PATH|Path|path) continue ;;
+              ''|*' '*|*'('*) continue ;;
+            esac
+            export "$key=$val"
+          done < vcenv.txt
+          win_path="$(grep -iE '^PATH=' vcenv.txt | head -1 | cut -d= -f2-)"
+          export PATH="$(cygpath -p "$win_path"):$PATH"
+          command -v cl.exe >/dev/null || { echo "vcvars did not put cl.exe on PATH"; exit 1; }
+
+          # Anything not built is time not spent, and none of this is used here: Router is
+          # a separate program, and the three legacy engines are not what any TideSQL test
+          # uses.  InnoDB stays -- the data dictionary is InnoDB tables, so the server does
+          # not start without it.
+          #
+          # Nothing here has to arrange for the debug-information format sccache needs.
+          # A separate PDB, which /Zi writes and two compilations share, is not cacheable;
+          # MySQL's own cmake/os/Windows.cmake already rewrites /Zi to /Z7 for every
+          # configuration, carrying the same information in each object file instead.
+          cmake -S mysql-server -B mysql-server/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             -DWITH_BOOST="$PWD/mysql-server/extra/boost" \
             -DWITH_UNIT_TESTS=OFF \
+            -DWITH_ROUTER=OFF \
+            -DWITHOUT_ARCHIVE_STORAGE_ENGINE=1 \
+            -DWITHOUT_BLACKHOLE_STORAGE_ENGINE=1 \
+            -DWITHOUT_FEDERATED_STORAGE_ENGINE=1 \
             -DWITH_SSL="$SSLDIR"
-          cmake --build mysql-server/build --config RelWithDebInfo --parallel 2>&1 | tee build.log
+          cmake --build mysql-server/build --parallel 2>&1 | tee build.log
+          sccache --show-stats || true
 
       # The plugin's own CMake returns early with only a STATUS message when it
       # cannot find libtidesdb, which would otherwise leave a green build with no
@@ -315,11 +382,46 @@ jobs:
         working-directory: mysql-server/build/mysql-test
         run: |
           set -euo pipefail
-          # libtidesdb and the vcpkg compression DLLs are loaded at runtime when the
-          # server dlopens the plugin; without them on PATH every test fails to load
-          # the engine rather than failing on anything it tests.
-          export PATH="$GITHUB_WORKSPACE/openssl-prefix/bin:$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin:$GITHUB_WORKSPACE/tidesdb-install/bin:$PATH"
-          perl mysql-test-run.pl --suite=tidesdb,tidesdb_rpl --parallel=2 --force --retry=1 2>&1 | tee ../../../mtr.log
+          # The plugin links the compression libraries as vcpkg's x64-windows triplet
+          # builds them, which is to say dynamically, so zstd.dll and lz4.dll have to be
+          # findable when the server loads it.  They are not linked into it: the message
+          # for a missing dependency is the same errno 126 as for a missing plugin, and
+          # reads as the plugin not being there at all.
+          #
+          # Both variables below hold Windows paths, and a Windows path cannot go into a
+          # PATH this shell builds: the drive colon in "D:\a\..." is the separator, so
+          # each one lands as an entry "D" and an entry "\a\..." and neither is a
+          # directory.  cygpath converts them to the form this shell splits correctly,
+          # and MSYS converts the whole thing back when it starts a native program.
+          ws="$(cygpath -u "$GITHUB_WORKSPACE")"
+          vcpkg_root="$(cygpath -u "$VCPKG_INSTALLATION_ROOT")"
+          export PATH="$ws/openssl-prefix/bin:$vcpkg_root/installed/x64-windows/bin:$ws/tidesdb-install/bin:$PATH"
+
+          # Check the files rather than trusting the paths: a dependency that is not
+          # reachable fails every test with an error that names no library at all.
+          vcpkg_bin="$vcpkg_root/installed/x64-windows/bin"
+          test -d "$vcpkg_bin" || { echo "no vcpkg bin directory at $vcpkg_bin"; exit 1; }
+          for pat in 'zstd*.dll' 'lz4*.dll'; do
+            # shellcheck disable=SC2086
+            match=$(ls $vcpkg_bin/$pat 2>/dev/null | head -1 || true)
+            test -n "$match" || { echo "no $pat in $vcpkg_bin; the plugin will not load";
+                                  ls "$vcpkg_bin"; exit 1; }
+            echo "  found $(basename "$match")"
+          done
+
+          # With no --plugin-dir the server looks in <basedir>/lib/plugin, and nothing
+          # puts anything there on Windows: MySQL's own CMakeLists links lib/plugin to
+          # plugin_output_directory only under "IF(UNIX AND BUILD_IS_SINGLE_CONFIG)", so
+          # the UNIX half excludes this even though Ninja satisfies the other half.  The
+          # server is told where the plugin actually is -- the same --plugin-dir mtr
+          # hands its own in-tree plugins through plugin.defs, which a third-party engine
+          # cannot add itself to.
+          plugin_dir="$(cd ../plugin_output_directory && pwd -W)"
+          echo "plugin-dir: $plugin_dir"
+          test -f "$plugin_dir/ha_tidesdb.dll"
+
+          perl mysql-test-run.pl --suite=tidesdb,tidesdb_rpl --parallel=2 --force --retry=1 \
+            --mysqld=--plugin-dir="$plugin_dir" 2>&1 | tee ../../../mtr.log
 
       # mtr reports success for an empty run, so a suite it failed to find would
       # otherwise pass.  The floor is deliberately loose: it catches "nothing ran",

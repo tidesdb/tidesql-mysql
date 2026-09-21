@@ -24,9 +24,14 @@ namespace tidesdb
 namespace cf_name
 {
 
-/* a table path arrives relative, as "./db/table". */
+/* a table path arrives relative, as "./db/table".  the separator is the server's, and MySQL builds
+ * a table path with FN_ROOTDIR, which is "\" on Windows and "/" everywhere else -- so the engine is
+ * handed ".\db\table" there.  both are accepted: a backslash cannot appear inside a name, because
+ * the server encodes one as @005c when it turns an identifier into a path component, so treating it
+ * as a separator is right on every platform rather than only on the one that uses it. */
 static constexpr const char REL_PATH_PREFIX[] = "./";
 static constexpr size_t REL_PATH_PREFIX_LEN = 2;
+static constexpr const char PATH_SEPARATORS[] = "/\\";
 
 /* a column-family name joins the database and table with this infix. */
 static constexpr const char DB_TABLE_SEP[] = "__";

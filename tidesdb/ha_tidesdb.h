@@ -308,6 +308,17 @@ struct tidesdb_trx_t
     std::vector<fts_meta_delta_t> fts_meta_pending;
     bool fts_meta_dirty{false};
 
+    /* What a DDL statement wrote to the engine's schema-change log, as (record key, encoded
+       record), read back by the post-DDL hook to see which of them survived the statement's
+       commit.
+       It lives here, on state the engine allocates and frees itself, rather than in a
+       thread_local.  A thread_local with a destructor is implemented on Windows as a callback
+       the DLL registers with fiber-local storage, and the server unloads the plugin before the
+       process exits -- so the runtime walks that list at ExitProcess and calls into an address
+       that is no longer mapped.  mysqld then dies on the way out, after every test has already
+       passed, which reads as the engine crashing rather than as a teardown ordering problem. */
+    std::vector<std::pair<std::string, std::string>> ddl_pending;
+
     /* Statement-atomicity bookkeeping.  A "stmt" library savepoint is armed at
        statement start (external_lock) inside a multi-statement transaction so a
        statement error rolls back only its own effects, not the whole txn.  The
