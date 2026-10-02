@@ -1,0 +1,85 @@
+--source ../include/have_tidesdb.inc
+
+#
+# A range scan returns the rows in the range, and no others.
+#
+# The engine may take a pushed index condition, and when it does it tells the server two things:
+# that it evaluates the whole condition, and -- through in_range_check_pushed_down -- that it
+# enforces the end of the range itself.  The server then stops doing either.  So anything the
+# engine takes, it has to actually check, and a scan that takes the condition without checking it
+# returns every row from the start of the range to the end of the table, each one reported as a
+# match.  Nothing errors and the rows are real, which is what makes it worth a test: the only
+# visible symptom is a count that is too big and a query that got slower.
+#
+# COUNT is what the assertions use rather than MIN and MAX.  The optimizer can answer those from
+# the index without running the scan, so they come back right even when the scan is wrong.
+#
+
+--echo #
+--echo # TEST 1: a range on the primary key
+--echo #
+
+CREATE TABLE rb (id INT PRIMARY KEY, v INT, KEY v_idx (v)) ENGINE=TidesDB;
+
+--disable_query_log
+SET SESSION cte_max_recursion_depth = 100000;
+INSERT INTO rb (id, v)
+  WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 10000)
+  SELECT n, n FROM s;
+--enable_query_log
+
+SELECT COUNT(*) AS rows_loaded FROM rb;
+
+--echo # a hundred-row window in the middle of the table
+SELECT COUNT(*) AS in_range, MIN(id) AS lo, MAX(id) AS hi FROM rb WHERE id BETWEEN 5000 AND 5099;
+
+--echo # one row
+SELECT COUNT(*) AS one FROM rb WHERE id BETWEEN 7777 AND 7777;
+
+--echo # an empty window between two rows that exist
+SELECT COUNT(*) AS none FROM rb WHERE id BETWEEN 5000 AND 4999;
+
+--echo # bounded at one end only
+SELECT COUNT(*) AS le_100 FROM rb WHERE id <= 100;
+SELECT COUNT(*) AS gt_9900 FROM rb WHERE id > 9900;
+
+--echo # and the same window read backwards
+SELECT COUNT(*) AS desc_range FROM rb
+  WHERE id BETWEEN 5000 AND 5099 ORDER BY id DESC;
+
+--echo #
+--echo # TEST 2: the same on a secondary index
+--echo #
+
+SELECT COUNT(*) AS in_range FROM rb WHERE v BETWEEN 5000 AND 5099;
+SELECT COUNT(*) AS none FROM rb WHERE v BETWEEN 5000 AND 4999;
+
+--echo #
+--echo # TEST 3: the answer cannot depend on index condition pushdown
+--echo #
+--echo # Whether the server pushes the condition down or evaluates it itself is a plan choice, and
+--echo # the row count is not the optimizer's to change.  These have to agree.
+
+SET SESSION optimizer_switch = 'index_condition_pushdown=on';
+SELECT COUNT(*) AS pk_icp_on FROM rb WHERE id BETWEEN 5000 AND 5099;
+SELECT COUNT(*) AS sk_icp_on FROM rb WHERE v BETWEEN 5000 AND 5099;
+
+SET SESSION optimizer_switch = 'index_condition_pushdown=off';
+SELECT COUNT(*) AS pk_icp_off FROM rb WHERE id BETWEEN 5000 AND 5099;
+SELECT COUNT(*) AS sk_icp_off FROM rb WHERE v BETWEEN 5000 AND 5099;
+
+SET SESSION optimizer_switch = DEFAULT;
+
+--echo #
+--echo # TEST 4: a condition beyond the range bounds is still applied
+--echo #
+--echo # The range narrows the scan; the rest of the condition has to filter what it returns,
+--echo # whoever ends up evaluating it.
+
+SELECT COUNT(*) AS odd_in_range FROM rb WHERE id BETWEEN 5000 AND 5099 AND id % 2 = 1;
+SELECT COUNT(*) AS v_odd_in_range FROM rb WHERE v BETWEEN 5000 AND 5099 AND v % 2 = 1;
+
+DROP TABLE rb;
+
+--source ../include/cleanup_tidesdb.inc
+--echo # Done.

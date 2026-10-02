@@ -63,6 +63,12 @@ int tdb_rc_to_ha(int rc, const char *ctx);
  */
 tidesdb_txn_t *tdb_stmt_txn_for_ddl(THD *thd);
 
+/* The statement-scoped snapshot read transaction a scan uses while the statement commits in
+   pieces, and its release at statement end.  Defined in ha_tidesdb_txn.cc beside the rest of the
+   per-connection transaction state. */
+tidesdb_txn_t *tdb_stmt_read_txn(tidesdb_trx_t *trx);
+void tdb_stmt_read_txn_release(tidesdb_trx_t *trx);
+
 /* a one-byte zero value stored for secondary-index entries, whose meaning is carried entirely by
    the key; its address and single-byte size are all that matter, so each translation unit having
    its own copy is fine. */

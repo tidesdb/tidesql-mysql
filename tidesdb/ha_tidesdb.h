@@ -302,6 +302,21 @@ struct tidesdb_trx_t
     tidesdb_isolation_level_t isolation_level{TDB_ISOLATION_REPEATABLE_READ};
     uint64_t txn_generation{0};
 
+    /* A statement that commits its work in pieces -- a bulk insert or bulk delete past the batch
+       threshold -- resets this connection's transaction part-way through, and resetting a
+       transaction detaches every iterator open under it.  That would silently end a scan another
+       handler on the same connection is reading from, which is what INSERT ... SELECT and a
+       copy-based ALTER both are: one handler scanning the source while the other writes and
+       commits.  So the reading side gets a transaction of its own, opened on a snapshot taken
+       before the statement wrote anything, which no mid-statement commit touches.  Reading at that
+       snapshot is also what the statement means: the rows it copies are the rows that were there
+       when it started, so a self-referencing INSERT ... SELECT cannot read its own output.
+       The snapshot has to outlive the transaction opened on it -- it is what holds the reclamation
+       floor under the versions being read -- so the transaction is freed first. */
+    tidesdb_snapshot_t *stmt_read_snapshot{nullptr};
+    tidesdb_txn_t *stmt_read_txn{nullptr};
+    bool stmt_piecewise{false};
+
     /* Per-statement FTS meta deltas, applied before tidesdb_commit hands
        the txn to the library so the meta update lands in the same commit
        as the row writes that produced it. */
@@ -410,6 +425,11 @@ class ha_tidesdb : public handler
     tidesdb_column_family_t *scan_iter_cf_; /* CF the cached scan_iter was created for */
     tidesdb_txn_t *scan_iter_txn_;          /* txn the cached scan_iter was created on */
     uint64_t scan_iter_txn_gen_;            /* txn_generation when scan_iter was created */
+
+    /* true when scan_iter was opened under the statement's snapshot read transaction rather than
+       the connection's.  That transaction lives only for the statement, so an iterator built on it
+       is never preserved past one -- the flag is what tells the statement-end path to drop it. */
+    bool scan_iter_read_txn_{false};
     /* When a range scan is set up via read_range_first these hold the encoded
        lower/upper key bounds, so ensure_scan_iter builds a range iterator that
        opens only the sstables overlapping the scan rather than every sstable in
@@ -1090,7 +1110,7 @@ class ha_tidesdb : public handler
     int external_lock_acquire(THD *thd);
     /* statement-end half of external_lock: free the scan iterator when the writeset moved, stamp
        the update time, and invalidate the per-statement caches. */
-    void external_lock_release(THD *thd);
+    void external_lock_release();
     THR_LOCK_DATA **store_lock(THD *thd, THR_LOCK_DATA **to, enum thr_lock_type lock_type) override;
 
     /* Online DDL -- instant metadata, inplace indexes, copy for columns */

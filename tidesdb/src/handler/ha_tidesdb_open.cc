@@ -596,6 +596,22 @@ int ha_tidesdb::create(const char *name, TABLE *table_arg,
     const ha_table_option_struct *opts = TDB_TABLE_OPTIONS(table_arg);
     DBUG_ASSERT(opts);
 
+    /* COMPRESSION names an algorithm this build may not have been linked against.  Refused here,
+       naming itself, rather than accepted and silently stored uncompressed -- a table that says it
+       is compressed and is not misleads every later reading of it. */
+    {
+        const int want = tdb_compression_map[opts->compression];
+        if (want != TDB_COMPRESS_NONE &&
+            !tidesdb_compression_available((tidesdb_compression_algorithm_t)want))
+        {
+            my_printf_error(ER_ILLEGAL_HA_CREATE_OPTION,
+                            "COMPRESSION=%s: this TidesDB build has no %s support", MYF(0),
+                            tdb_compression_option_names()[opts->compression],
+                            tdb_compression_option_names()[opts->compression]);
+            DBUG_RETURN(HA_WRONG_CREATE_OPTION);
+        }
+    }
+
     tidesdb_column_family_config_t cfg = build_cf_config(opts);
     tidesdb_column_family_config_t data_cfg = data_cf_config(cfg, opts && opts->encrypted);
 
