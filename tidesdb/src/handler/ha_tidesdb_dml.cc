@@ -690,6 +690,10 @@ void ha_tidesdb::start_bulk_insert(TDB_BULK_INSERT_ARGS)
 {
     in_bulk_insert_ = true;
     bulk_insert_ops_ = 0;
+    /* Announce to the connection that this statement may commit part-way, so a scan opened on it
+       -- the SELECT of an INSERT ... SELECT, the source of a copy-based ALTER -- reads under a
+       snapshot transaction of its own instead of the one those commits reset. */
+    if (cached_trx_) cached_trx_->stmt_piecewise = true;
 }
 
 int ha_tidesdb::end_bulk_insert()
@@ -818,6 +822,7 @@ bool ha_tidesdb::start_bulk_delete()
 {
     in_bulk_delete_ = true;
     bulk_insert_ops_ = 0;
+    if (cached_trx_) cached_trx_->stmt_piecewise = true;
     bulk_delete_rows_ = 0;
     bulk_delete_min_pk_.clear();
     bulk_delete_max_pk_.clear();
@@ -913,10 +918,20 @@ Item *ha_tidesdb::idx_cond_push(uint keyno, Item *idx_cond)
 {
     DBUG_ENTER("ha_tidesdb::idx_cond_push");
 
-    /* We accept the pushed condition, the server will evaluate it for us
-       during index scans via handler::pushed_idx_cond.  For secondary
-       index scans the condition is checked before the PK lookup, saving
-       the most expensive operation when the condition filters rows. */
+    /* Only a secondary index scan takes it.
+       What evaluates a pushed condition is icp_check_secondary, and the index scans call it only
+       for a secondary index.  Taking the condition on a primary-key scan would mean returning NULL
+       -- telling the server the engine evaluates all of it -- and setting
+       in_range_check_pushed_down, telling it the engine also enforces the end of the range, while
+       nothing on that path does either.  The server stops applying both on that promise and takes
+       every row the scan hands back, so a primary-key range reads on to the end of the table and
+       those extra rows come back as matches.  It is wrong quietly: they are real rows, just not the
+       ones that were asked for.
+       Nothing is given up by declining.  ICP earns its keep by evaluating an index entry before the
+       base-row fetch it would otherwise need, and a primary-key scan already holds the row. */
+    const bool is_pk = share && share->has_user_pk && keyno == share->pk_index;
+    if (is_pk) DBUG_RETURN(idx_cond); /* not taken -- the server goes on evaluating it */
+
     pushed_idx_cond = idx_cond;
     pushed_idx_cond_keyno = keyno;
     in_range_check_pushed_down = true;

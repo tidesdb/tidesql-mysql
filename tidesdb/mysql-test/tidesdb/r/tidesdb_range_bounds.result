@@ -1,0 +1,73 @@
+#
+# TEST 1: a range on the primary key
+#
+CREATE TABLE rb (id INT PRIMARY KEY, v INT, KEY v_idx (v)) ENGINE=TidesDB;
+SELECT COUNT(*) AS rows_loaded FROM rb;
+rows_loaded
+10000
+# a hundred-row window in the middle of the table
+SELECT COUNT(*) AS in_range, MIN(id) AS lo, MAX(id) AS hi FROM rb WHERE id BETWEEN 5000 AND 5099;
+in_range	lo	hi
+100	5000	5099
+# one row
+SELECT COUNT(*) AS one FROM rb WHERE id BETWEEN 7777 AND 7777;
+one
+1
+# an empty window between two rows that exist
+SELECT COUNT(*) AS none FROM rb WHERE id BETWEEN 5000 AND 4999;
+none
+0
+# bounded at one end only
+SELECT COUNT(*) AS le_100 FROM rb WHERE id <= 100;
+le_100
+100
+SELECT COUNT(*) AS gt_9900 FROM rb WHERE id > 9900;
+gt_9900
+100
+# and the same window read backwards
+SELECT COUNT(*) AS desc_range FROM rb
+WHERE id BETWEEN 5000 AND 5099 ORDER BY id DESC;
+desc_range
+100
+#
+# TEST 2: the same on a secondary index
+#
+SELECT COUNT(*) AS in_range FROM rb WHERE v BETWEEN 5000 AND 5099;
+in_range
+100
+SELECT COUNT(*) AS none FROM rb WHERE v BETWEEN 5000 AND 4999;
+none
+0
+#
+# TEST 3: the answer cannot depend on index condition pushdown
+#
+# Whether the server pushes the condition down or evaluates it itself is a plan choice, and
+# the row count is not the optimizer's to change.  These have to agree.
+SET SESSION optimizer_switch = 'index_condition_pushdown=on';
+SELECT COUNT(*) AS pk_icp_on FROM rb WHERE id BETWEEN 5000 AND 5099;
+pk_icp_on
+100
+SELECT COUNT(*) AS sk_icp_on FROM rb WHERE v BETWEEN 5000 AND 5099;
+sk_icp_on
+100
+SET SESSION optimizer_switch = 'index_condition_pushdown=off';
+SELECT COUNT(*) AS pk_icp_off FROM rb WHERE id BETWEEN 5000 AND 5099;
+pk_icp_off
+100
+SELECT COUNT(*) AS sk_icp_off FROM rb WHERE v BETWEEN 5000 AND 5099;
+sk_icp_off
+100
+SET SESSION optimizer_switch = DEFAULT;
+#
+# TEST 4: a condition beyond the range bounds is still applied
+#
+# The range narrows the scan; the rest of the condition has to filter what it returns,
+# whoever ends up evaluating it.
+SELECT COUNT(*) AS odd_in_range FROM rb WHERE id BETWEEN 5000 AND 5099 AND id % 2 = 1;
+odd_in_range
+50
+SELECT COUNT(*) AS v_odd_in_range FROM rb WHERE v BETWEEN 5000 AND 5099 AND v % 2 = 1;
+v_odd_in_range
+50
+DROP TABLE rb;
+# Done.

@@ -17,7 +17,9 @@
 
 #include "ha_tidesdb.h"
 
+#include <mysql/components/services/mysql_system_variable.h>
 #include <mysql/plugin.h>
+#include <mysql/service_plugin_registry.h>
 
 #include <map>
 #include <mutex>
@@ -30,6 +32,38 @@
 #include "src/handler/ha_tidesdb_fts.h"
 #include "src/handler/ha_tidesdb_internal.h"
 #include "src/handler/ha_tidesdb_txn.h"
+
+/**
+ * tdb_binlog_enabled
+ * whether the server has the binary log on
+ * @return true when @@GLOBAL.log_bin reads ON
+ *
+ * Read through the sysvar service rather than the mysqld global, which the server does not export
+ * to plugins.  Called once, from handlerton init, which the server runs before it picks the
+ * transaction coordinator.
+ */
+static bool tdb_binlog_enabled()
+{
+    SERVICE_TYPE(registry) *reg = mysql_plugin_registry_acquire();
+    if (!reg) return false;
+
+    bool on = false;
+    my_h_service svc = nullptr;
+    if (!reg->acquire("mysql_system_variable_reader", &svc) && svc)
+    {
+        auto *reader = reinterpret_cast<SERVICE_TYPE(mysql_system_variable_reader) *>(svc);
+        char buf[8];
+        char *value = buf;
+        size_t value_len = sizeof(buf) - 1;
+        if (!reader->get(nullptr, "GLOBAL", "mysql_server", "log_bin",
+                         reinterpret_cast<void **>(&value), &value_len) &&
+            value != nullptr && value_len >= 2)
+            on = (value[0] == 'O' || value[0] == 'o') && (value[1] == 'N' || value[1] == 'n');
+        reg->release(svc);
+    }
+    mysql_plugin_registry_release(reg);
+    return on;
+}
 
 /* Prepared transactions awaiting their phase-two decision, keyed by the serialized XID.  An
    external XA PREPARE hands its library transaction here and detaches it from the connection, and
@@ -258,6 +292,65 @@ static bool stmt_savepoint_rollback(tidesdb_trx_t *trx)
     return true;
 }
 
+/**
+ * tdb_stmt_read_txn
+ * the transaction a scan should read under while this statement commits in pieces
+ * @param trx the connection's transaction
+ * @return the snapshot-backed read transaction, or NULL when the statement is not one that
+ *         commits in pieces or the snapshot could not be taken
+ *
+ * Opened on the first scan of such a statement and held until it ends.  Taking the snapshot here,
+ * rather than at the first mid-statement commit, is what keeps it clear of the statement's own
+ * writes: by the time a commit happens the statement has already written rows, and a snapshot
+ * taken then would show them to the scan still reading.
+ */
+tidesdb_txn_t *tdb_stmt_read_txn(tidesdb_trx_t *trx)
+{
+    if (!trx || !trx->stmt_piecewise) return NULL;
+    if (trx->stmt_read_txn) return trx->stmt_read_txn;
+
+    if (tidesdb_snapshot_create(tdb_global, &trx->stmt_read_snapshot) != TDB_SUCCESS)
+    {
+        trx->stmt_read_snapshot = NULL;
+        return NULL;
+    }
+    if (tidesdb_txn_begin_at_snapshot(tdb_global, trx->stmt_read_snapshot, &trx->stmt_read_txn) !=
+        TDB_SUCCESS)
+    {
+        tidesdb_snapshot_release(trx->stmt_read_snapshot);
+        trx->stmt_read_snapshot = NULL;
+        trx->stmt_read_txn = NULL;
+        return NULL;
+    }
+    return trx->stmt_read_txn;
+}
+
+/**
+ * tdb_stmt_read_txn_release
+ * drop the statement's snapshot read transaction once the statement is over
+ * @param trx the connection's transaction
+ *
+ * Safe to call with iterators still open under it: freeing a transaction detaches them, and a
+ * detached iterator answers nothing but its own free, which touches none of the transaction.  The
+ * snapshot is released after the transaction that reads at it, never before.
+ */
+void tdb_stmt_read_txn_release(tidesdb_trx_t *trx)
+{
+    if (!trx) return;
+    if (trx->stmt_read_txn)
+    {
+        tidesdb_txn_rollback(trx->stmt_read_txn);
+        tidesdb_txn_free(trx->stmt_read_txn);
+        trx->stmt_read_txn = NULL;
+    }
+    if (trx->stmt_read_snapshot)
+    {
+        tidesdb_snapshot_release(trx->stmt_read_snapshot);
+        trx->stmt_read_snapshot = NULL;
+    }
+    trx->stmt_piecewise = false;
+}
+
 /* ******************** Per-connection transaction helpers ******************** */
 
 /*
@@ -411,6 +504,11 @@ static int tidesdb_savepoint_release(TDB_HTON_CB_ARG THD *thd, void *sv)
    object alive and reset-pending for reuse. */
 static int tdb_finalize_commit(THD *thd, tidesdb_trx_t *trx)
 {
+    /* No statement is in flight across a transaction boundary, so nothing may still be reading at
+       the statement snapshot.  Released here too because the transaction can end without the
+       statement-end path running, and the snapshot holds the reclamation floor until it does. */
+    tdb_stmt_read_txn_release(trx);
+
     /* We must release any active statement savepoint before final commit/rollback.
        Savepoints must be explicitly released before txn_commit.  Disarm also
        clears the per-statement undo journal and fts snapshot; it leaves
@@ -451,6 +549,7 @@ static int tdb_finalize_commit(THD *thd, tidesdb_trx_t *trx)
         int rc = tdb_txn_commit_stateful(thd, trx->txn);
         if (rc != TDB_SUCCESS)
         {
+
             /* Only log truly unexpected errors (not transient conflicts). */
             if (rc != TDB_ERR_CONFLICT && rc != TDB_ERR_LOCKED && rc != TDB_ERR_MEMORY_LIMIT)
                 sql_print_error("[TIDESDB] hton_commit: tidesdb_txn_commit returned %d "
@@ -756,7 +855,7 @@ int ha_tidesdb::start_stmt(THD *thd, thr_lock_type lock_type [[maybe_unused]])
     return external_lock_acquire(thd);
 }
 
-void ha_tidesdb::external_lock_release(THD *thd)
+void ha_tidesdb::external_lock_release()
 {
     /* For multi-statement transactions (BEGIN...COMMIT), the txn stays the
        same across statements.  Preserve the cached scan iterator across
@@ -765,19 +864,34 @@ void ha_tidesdb::external_lock_release(THD *thd)
        freed: an iterator snapshots the txn's writeset when created, so one
        built before this statement's puts/deletes would not see them.  For
        autocommit, always free. */
-    bool in_multi_stmt = cached_stmt_shape_valid_
-                             ? !cached_is_autocommit_
-                             : (bool)thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN);
-    if (!in_multi_stmt || stmt_txn_dirty)
+    /* The cached iterator does not outlive the statement that built it.  It used to be kept across
+       a read-only statement of a multi-statement transaction, to save the next one the
+       O(sstables) merge-heap rebuild, and that is no longer worth what it costs:
+
+       - It is only sound where the transaction's snapshot is frozen at its start.  Read committed
+         and below re-read the sequence watermark for each operation, so the next statement there
+         is entitled to see what other connections committed since this one, and an iterator
+         carries the merge heap it was built with, which hides exactly that.
+       - The next statement's first act is to reset the connection's transaction, and a reset
+         detaches every iterator still open under it.  Keeping one alive across that boundary
+         leaves the engine walking a list of iterators this handler is no longer stepping, for a
+         statement that is going to rebuild its scan anyway.
+
+       Caching within a statement is untouched, which is where it pays: index_init/index_end cycle
+       once per outer row in a nested-loop join and reuse the same iterator throughout. */
+    if (scan_iter)
     {
-        if (scan_iter)
-        {
-            tidesdb_iter_free(scan_iter);
-            scan_iter = NULL;
-            scan_iter_cf_ = NULL;
-            scan_iter_txn_ = NULL;
-        }
+        tidesdb_iter_free(scan_iter);
+        scan_iter = NULL;
+        scan_iter_cf_ = NULL;
+        scan_iter_txn_ = NULL;
+        scan_iter_read_txn_ = false;
     }
+
+    /* The statement is over, so its snapshot read transaction and the snapshot under it go.  Done
+       here rather than in end_bulk_insert/end_bulk_delete so a statement that fails before those
+       run does not leave the snapshot holding the reclamation floor for the connection's life. */
+    tdb_stmt_read_txn_release(cached_trx_);
 
     /* We bump update_time once per write-statement for information_schema.
        We use cached_time_ if available to avoid another time() syscall. */
@@ -807,7 +921,7 @@ int ha_tidesdb::external_lock(THD *thd, int lock_type)
 
     if (lock_type != F_UNLCK) DBUG_RETURN(external_lock_acquire(thd));
 
-    external_lock_release(thd);
+    external_lock_release();
     DBUG_RETURN(0);
 }
 
@@ -1295,12 +1409,32 @@ void tidesdb_txn_register(handlerton *hton)
 
     /* two-phase commit (XA) -- prepare durably logs the write batch under the XID, the by-xid
        resolvers finish a prepared transaction from any connection, and recover replays the ones the
-       library found in-doubt after a restart. */
-    hton->prepare = tidesdb_prepare;
-    TDB_HTON_SET_PREPARED_IN_TC(hton, tidesdb_set_prepared_in_tc);
-    TDB_HTON_RECOVER_PREPARED_IN_TC(hton, tidesdb_recover_prepared_in_tc);
-    TDB_HTON_SET_PREPARED_IN_TC_BY_XID(hton, tidesdb_set_prepared_in_tc_by_xid);
-    hton->recover = tidesdb_recover;
-    hton->commit_by_xid = tidesdb_commit_by_xid;
-    hton->rollback_by_xid = tidesdb_rollback_by_xid;
+       library found in-doubt after a restart.
+       Offered only with the binary log on, and not because the engine needs it.  Declaring prepare
+       is what takes the server's count of two-phase-capable engines past one, and with the binary
+       log off that makes it coordinate through TC_LOG_MMAP -- a fixed 24KB ring whose commit path
+       reserves a slot per transaction and returns without releasing it when an engine's commit
+       fails.  A slot never released pins its whole page, and six of them deadlock every later
+       commit in the server.  InnoDB's commit cannot fail, so nothing else reaches it; this engine
+       validates at commit, so a write conflict under concurrency reaches it within minutes.  With
+       the binary log on the coordinator is the binary log, which has no such pool, so XA is
+       offered there in full. */
+    if (tdb_binlog_enabled())
+    {
+        hton->prepare = tidesdb_prepare;
+        TDB_HTON_SET_PREPARED_IN_TC(hton, tidesdb_set_prepared_in_tc);
+        TDB_HTON_RECOVER_PREPARED_IN_TC(hton, tidesdb_recover_prepared_in_tc);
+        TDB_HTON_SET_PREPARED_IN_TC_BY_XID(hton, tidesdb_set_prepared_in_tc_by_xid);
+        hton->recover = tidesdb_recover;
+        hton->commit_by_xid = tidesdb_commit_by_xid;
+        hton->rollback_by_xid = tidesdb_rollback_by_xid;
+    }
+    else
+    {
+        sql_print_warning(
+            "[TIDESDB] the binary log is off, so XA is not offered: coordinating a second "
+            "two-phase engine without it goes through a fixed-size log the server does not "
+            "release a slot in when an engine's commit fails, which deadlocks every later "
+            "commit.  Enable --log-bin to use XA with TidesDB.");
+    }
 }

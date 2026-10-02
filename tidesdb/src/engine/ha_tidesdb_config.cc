@@ -112,7 +112,13 @@ tidesdb_column_family_config_t build_cf_config(const ha_table_option_struct *opt
     /* compression is the first stage of the encoding pipeline in TidesDB 10; other
        per-cf knobs (write buffer, sync mode, skip list, l0 stall) moved to the db-level
        tidesdb_config_t and are applied at open. */
+    /* A backend is only linked in when its build option was set, so what the enum offers and what
+       this build can do are different questions.  Asking here keeps an unavailable choice from
+       reaching a column family, where it would not surface until a node failed to decode. */
     int comp = tdb_compression_map[opts->compression];
+    if (comp != TDB_COMPRESS_NONE &&
+        !tidesdb_compression_available((tidesdb_compression_algorithm_t)comp))
+        comp = TDB_COMPRESS_NONE;
     if (comp != TDB_COMPRESS_NONE)
     {
         cfg.encoding_pipeline[0] = (uint8_t)comp;

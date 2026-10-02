@@ -157,9 +157,15 @@ get_latest_tidesdb_version() {
 get_latest_mysql_version() {
     # mysql/mysql-server publishes tags rather than GitHub releases, so this reads the tag list and
     # takes the highest mysql-N.N.N.  Cluster tags share the repo and are filtered out.
+    #
+    # The tags come from git rather than the GitHub tags API because that API pages at 100 entries
+    # in an order that is not newest-first, and mysql-cluster-* alone more than fills the first
+    # page -- so a one-page read matches no server tag at all and silently takes the fallback
+    # below, pinning every install to it however far the series has moved on.  git ls-remote
+    # returns every tag in one request and needs no paging.
     local version
-    version=$(_fetch_url "https://api.github.com/repos/mysql/mysql-server/tags?per_page=100" \
-        | grep '"name":' | sed -E 's/.*"name": *"([^"]+)".*/\1/' \
+    version=$(git ls-remote --tags --refs https://github.com/mysql/mysql-server.git 2>/dev/null \
+        | sed -E 's#.*refs/tags/##' \
         | grep -E '^mysql-[0-9]+\.[0-9]+\.[0-9]+$' \
         | sort -t- -k2 -V | tail -1)
     if [[ -z "$version" ]]; then

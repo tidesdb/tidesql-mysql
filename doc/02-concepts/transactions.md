@@ -134,6 +134,14 @@ stays bounded regardless of statement size, and the statement reports the first 
 paths share one mid-statement commit helper, so the threshold and the iterator and dup-cache
 invalidation are identical on each.
 
+A statement that commits in pieces reads under a snapshot of its own, taken before it wrote
+anything, rather than under the transaction those commits reset. This is what lets a statement both
+scan and write: `INSERT ... SELECT` and a copy-based `ALTER` read the source while the destination
+commits batch after batch, and resetting the writing transaction would otherwise end the reading
+scan where it stood. It also fixes the rows the statement sees: a self-referencing
+`INSERT INTO t SELECT ... FROM t` copies the rows that were in `t` when it started and cannot read
+its own output.
+
 `UPDATE` is deliberately excluded. The server offers a batched-update path, but a multi-row `UPDATE`
 routed through it is never written to the binary log: `handler::ha_update_row` logs the row it
 changed, and `handler::ha_bulk_update_row` does not. An engine that accepts batching there loses
@@ -157,12 +165,22 @@ on the ordinary commit path and inherits the ordering the coordinator imposes ar
 
 ## Crash recovery and two-phase commit
 
-TideSQL is a full two-phase commit participant, so it recovers to a consistent point after a crash
-and coordinates with the binlog and with external XA. In the prepare phase the engine durably logs
-the transaction's write batch under its XID, so a crash after prepare but before commit leaves an
-in-doubt transaction that recovery resolves rather than loses. A prepared transaction is held in a
-process-wide registry, so its commit or rollback decision can arrive from another connection or after
-a restart.
+With the binary log enabled, TideSQL is a full two-phase commit participant, so it recovers to a
+consistent point after a crash and coordinates with the binlog and with external XA. In the prepare
+phase the engine durably logs the transaction's write batch under its XID, so a crash after prepare
+but before commit leaves an in-doubt transaction that recovery resolves rather than loses. A
+prepared transaction is held in a process-wide registry, so its commit or rollback decision can
+arrive from another connection or after a restart.
+
+With the binary log off the engine does not offer two-phase commit, `SHOW ENGINES` reports `XA: NO`,
+and `XA START` is refused. That is not a gap in the engine but a deliberate refusal to reach a
+server path that cannot carry it: the binary log is the transaction coordinator when it is on, and
+when it is off a second two-phase-capable engine makes the server coordinate through a fixed-size
+log whose commit path does not release a transaction's slot when an engine's commit fails. A slot
+never released pins its page, and enough of them stop every later commit in the server. An engine
+whose commit cannot fail never reaches that path; TideSQL validates writes at commit, so under
+concurrency it would. Enable `--log-bin` to use XA. Single-engine transactions, savepoints, and
+crash recovery of the engine's own data are unaffected and work either way.
 
 When the server restarts it asks the engine to recover, and the engine replays every in-doubt
 prepared transaction so the coordinator can commit or roll each one back to match the binlog. An

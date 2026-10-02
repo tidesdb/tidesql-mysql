@@ -60,8 +60,14 @@ int ha_tidesdb::rnd_init(bool scan [[maybe_unused]])
        on every scan init -- this is a hot path in nested-loop joins. */
     uint64_t cur_gen = cached_trx_ ? cached_trx_->txn_generation : 0;
 
+    /* While the statement commits in pieces the scan reads under its own snapshot transaction, so
+       the mid-statement commits -- which reset the connection's transaction and detach every
+       iterator open under it -- cannot end this scan part-way. */
+    tidesdb_txn_t *read_txn = tdb_stmt_read_txn(cached_trx_);
+    tidesdb_txn_t *iter_txn = read_txn ? read_txn : scan_txn;
+
     if (scan_iter &&
-        (scan_iter_cf_ != share->cf || scan_iter_txn_ != scan_txn || scan_iter_txn_gen_ != cur_gen))
+        (scan_iter_cf_ != share->cf || scan_iter_txn_ != iter_txn || scan_iter_txn_gen_ != cur_gen))
     {
         tidesdb_iter_free(scan_iter);
         scan_iter = NULL;
@@ -71,15 +77,16 @@ int ha_tidesdb::rnd_init(bool scan [[maybe_unused]])
 
     if (!scan_iter)
     {
-        int rc = tdb_iter_new_blocking(ha_thd(), scan_txn, share->cf, &scan_iter);
+        int rc = tdb_iter_new_blocking(ha_thd(), iter_txn, share->cf, &scan_iter);
         if (rc != TDB_SUCCESS)
         {
             scan_txn = NULL;
             DBUG_RETURN(tdb_rc_to_ha(rc, "rnd_init txn_begin"));
         }
         scan_iter_cf_ = share->cf;
-        scan_iter_txn_ = scan_txn;
+        scan_iter_txn_ = iter_txn;
         scan_iter_txn_gen_ = cur_gen;
+        scan_iter_read_txn_ = (read_txn != NULL);
     }
 
     uint8_t data_prefix = KEY_NS_DATA;
@@ -201,17 +208,10 @@ int ha_tidesdb::index_init(uint idx, bool sorted [[maybe_unused]])
        We use cached_trx_ (set in external_lock) to avoid ha_thd() virtual
        dispatch + thd_get_ha_data() hash lookup on every iteration of
        the outer loop in nested-loop joins. */
-    uint64_t cur_gen = cached_trx_ ? cached_trx_->txn_generation : 0;
-
-    if (scan_iter &&
-        (scan_iter_cf_ != target_cf || scan_iter_txn_ != scan_txn || scan_iter_txn_gen_ != cur_gen))
-    {
-        tidesdb_iter_free(scan_iter);
-        scan_iter = NULL;
-        scan_iter_cf_ = NULL;
-        scan_iter_txn_ = NULL;
-    }
-    /* If scan_iter is non-NULL here, ensure_scan_iter() will reuse it. */
+    /* Whether the cached iterator still serves is decided in one place, ensure_scan_iter(), which
+       resolves the transaction a scan should read under first -- that is not always scan_txn, and
+       testing it here against scan_txn would discard a usable iterator every time a statement
+       reads under its own snapshot transaction. */
 
     DBUG_RETURN(0);
 }
@@ -222,6 +222,30 @@ int ha_tidesdb::index_init(uint idx, bool sorted [[maybe_unused]])
 */
 int ha_tidesdb::ensure_scan_iter()
 {
+    /* While the statement commits in pieces the scan reads under its own snapshot transaction --
+       see tdb_stmt_read_txn.  Resolved before the cached iterator is reused, because an iterator
+       built under the connection's transaction before the statement turned piecewise has to be
+       rebuilt under the read one rather than stepped to the first mid-statement commit and left
+       detached there. */
+    tidesdb_txn_t *read_txn = tdb_stmt_read_txn(cached_trx_);
+    tidesdb_txn_t *want_txn = read_txn ? read_txn : scan_txn;
+
+    /* A cached iterator is only good while the transaction it was opened under is the one still
+       wanted and has not been reset since: a reset detaches it, after which it reports invalid and
+       a scan stepping it ends silently wherever it had reached.  The reset need not be this
+       handler's -- a bulk insert on another table of the same connection resets the transaction
+       this scan shares -- so the generation is what decides, not the pointer, which a reset
+       leaves unchanged. */
+    const uint64_t cur_gen = cached_trx_ ? cached_trx_->txn_generation : 0;
+    if (scan_iter &&
+        (scan_iter_cf_ != scan_cf_ || scan_iter_txn_ != want_txn || scan_iter_txn_gen_ != cur_gen))
+    {
+        tidesdb_iter_free(scan_iter);
+        scan_iter = NULL;
+        scan_iter_cf_ = NULL;
+        scan_iter_txn_ = NULL;
+    }
+
     if (scan_iter) return 0;
 
     /* If a prior attempt with this exact (scan_cf_, scan_txn) combination
@@ -242,16 +266,17 @@ int ha_tidesdb::ensure_scan_iter()
     }
     int rc;
     if (scan_range_valid_)
-        rc = tdb_iter_new_range_blocking(ha_thd(), scan_txn, scan_cf_, scan_range_lo_,
+        rc = tdb_iter_new_range_blocking(ha_thd(), want_txn, scan_cf_, scan_range_lo_,
                                          scan_range_lo_len_, scan_range_hi_, scan_range_hi_len_,
                                          &scan_iter);
     else
-        rc = tdb_iter_new_blocking(ha_thd(), scan_txn, scan_cf_, &scan_iter);
+        rc = tdb_iter_new_blocking(ha_thd(), want_txn, scan_cf_, &scan_iter);
     if (rc == TDB_SUCCESS)
     {
         scan_iter_cf_ = scan_cf_;
-        scan_iter_txn_ = scan_txn;
-        scan_iter_txn_gen_ = cached_trx_ ? cached_trx_->txn_generation : 0;
+        scan_iter_txn_ = want_txn;
+        scan_iter_txn_gen_ = cur_gen;
+        scan_iter_read_txn_ = (read_txn != NULL);
         scan_iter_last_err_ = 0;
         return 0;
     }

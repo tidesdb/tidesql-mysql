@@ -17,7 +17,6 @@ id	val
 SELECT * FROM t_pk WHERE id >= 15 AND id <= 25;
 id	val
 20	twenty
-30	thirty
 # Full scan (should still work)
 SELECT * FROM t_pk ORDER BY id;
 id	val
@@ -141,7 +140,6 @@ SELECT id, k FROM t_combined WHERE id BETWEEN 2 AND 3 ORDER BY id;
 id	k
 2	2
 3	3
-4	1
 # Lookup via secondary index
 SELECT id, k FROM t_combined WHERE k = 1 ORDER BY id;
 id	k

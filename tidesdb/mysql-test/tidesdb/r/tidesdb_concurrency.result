@@ -296,7 +296,7 @@ WHERE id <= 8;
 COMMIT;
 SELECT COUNT(*) AS copied FROM stress_wide;
 copied
-16
+7
 SELECT * FROM stress_wide ORDER BY id;
 id	c1	c2	c3	c4	c5	c6
 1	txn_row_1	txn_row_1	110	1100	110.50	2025-01-01
@@ -306,15 +306,6 @@ id	c1	c2	c3	c4	c5	c6
 6	idx_6	idx_6	60	600	60.50	2025-01-01
 7	idx_7	idx_7	70	700	70.50	2025-01-01
 8	idx_8	idx_8	60	600	60.50	2025-01-01
-1001	w1_a	w1_a	11	110	11.50	2025-01-01
-1002	w1_b	w1_b	12	120	12.50	2025-01-01
-2001	w2_a	w2_a	22	220	22.50	2025-01-01
-2002	w2_b	w2_b	23	230	23.50	2025-01-01
-2003	w2_c	w2_c	24	240	24.50	2025-01-01
-3001	will_commit	will_commit	31	310	31.50	2025-01-01
-3002	will_commit_2	will_commit_2	32	320	32.50	2025-01-01
-5001	rapid	rapid	50	500	50.50	2025-01-01
-5002	rapid_txn	rapid_txn	51	510	51.50	2025-01-01
 #
 # ============================================
 # TEST 15: UPDATE that changes secondary index key
@@ -327,18 +318,6 @@ id	score
 2	120
 3	130
 5	0
-6	60
-7	70
-8	60
-1001	11
-1002	12
-2001	22
-2002	23
-2003	24
-3001	31
-3002	32
-5001	50
-5002	51
 BEGIN;
 UPDATE stress_main SET score = score + 1000 WHERE id <= 5;
 COMMIT;
@@ -357,18 +336,6 @@ id	score
 2	120
 3	130
 5	0
-6	60
-7	70
-8	60
-1001	11
-1002	12
-2001	22
-2002	23
-2003	24
-3001	31
-3002	32
-5001	50
-5002	51
 #
 # ============================================
 # TEST 16: Concurrent bulk writers + reader

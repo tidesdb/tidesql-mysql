@@ -60,6 +60,14 @@ server does not retry it for you, so any application writing concurrently to the
 retry logic for 1180. There are no pessimistic row locks, so there are no lock waits and no
 lock-wait deadlocks to tune. See [Transactions and Isolation](/concepts/transactions).
 
+**XA needs the binary log.** With `--log-bin` off the engine does not offer two-phase commit:
+`SHOW ENGINES` reports `XA: NO` and `XA START` is refused. With it on, XA works in full. The reason
+is a server limitation rather than an engine one -- without the binary log, a second
+two-phase-capable engine makes the server coordinate through a fixed-size transaction log whose
+commit path does not release a slot when an engine's commit fails, and enough unreleased slots stop
+every later commit in the server. Ordinary transactions, savepoints and crash recovery are
+unaffected. See [Transactions and Isolation](/concepts/transactions).
+
 **`READ COMMITTED` does not detect write conflicts.** A session that asks for it explicitly gets a
 level at which a write is a blind overwrite: if another transaction wrote the same row first, that
 write is lost. That is the documented behaviour of the level and the right trade for appending
@@ -101,14 +109,20 @@ has no state for reporting a kill, so an index scan evaluating a pushed conditio
 `KILL` at the row boundary the scan already checks rather than inside condition evaluation. The
 difference is one row.
 
-**Index condition pushdown is taken; whole-condition pushdown is not.** A condition on the columns
-of the index being scanned is pushed into the engine and evaluated against the index entry, which
+**Index condition pushdown is taken on secondary indexes only.** A condition on the columns of a
+secondary index being scanned is pushed into the engine and evaluated against the index entry, which
 skips the row fetch for an entry that cannot match — that is the pushdown worth having, and TideSQL
-implements it. The separate interface for pushing an entire `WHERE` clause is offered only to
-single-table `UPDATE` and `DELETE`, and the server evaluates the clause again for every row the
-engine returns regardless of what the engine reports back. Taking it would duplicate work the server
-repeats anyway and would evaluate user expressions twice, so TideSQL leaves it alone, as InnoDB
-does. `EXPLAIN` accordingly shows `Using index condition` but never `Using pushed condition`.
+implements it. A primary-key scan declines it, because there is nothing to win there: what the
+pushdown saves is the base-row fetch an index entry would otherwise need, and a primary-key scan is
+already holding the row. `EXPLAIN` shows the difference — `Using index condition` on a
+secondary-index scan, `Using where` on a primary-key range — and the rows returned are the same
+either way.
+
+**Whole-condition pushdown is not taken at all.** The separate interface for pushing an entire
+`WHERE` clause is offered only to single-table `UPDATE` and `DELETE`, and the server evaluates the
+clause again for every row the engine returns regardless of what the engine reports back. Taking it
+would duplicate work the server repeats anyway and would evaluate user expressions twice, so TideSQL
+leaves it alone, as InnoDB does. `EXPLAIN` never shows `Using pushed condition`.
 
 **The plugin may need the allocator preloaded to load at all.** When the linked TidesDB library was
 built against `jemalloc`, `mimalloc` or `tcmalloc`, the plugin cannot be `dlopen`ed without the

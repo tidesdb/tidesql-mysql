@@ -44,7 +44,7 @@ The flags worth knowing:
 | `--pgo` | Three-phase profile-guided build: instrument, train on the test suite, rebuild optimised |
 
 ```bash
-./install.sh --mysql-version mysql-9.7.0 --jobs 8
+./install.sh --mysql-version mysql-26.7.0 --jobs 8
 ./install.sh --skip-deps --skip-tidesdb        # rebuild against what is already installed
 ./install.sh --rebuild-plugin                  # just the plugin, after an edit
 ```
@@ -139,6 +139,9 @@ TRANSACTIONS: YES
           XA: YES
   SAVEPOINTS: YES
 ```
+
+`XA` reads `YES` with the binary log enabled and `NO` without it -- see
+[Limitations](/appendix/limitations) for why.
 
 and reports its version through the plugin table and its own status variables:
 
