@@ -16,7 +16,7 @@ that server version.
 | MySQL 26.7.0 | 2.0.0 | Yes |
 
 This is the TideSQL 2.x manual and it pairs with TidesDB v10. The current pinned release is 2.0.0,
-linking TidesDB v10.1.0, at **beta** maturity. A 2.x minor or patch links a TidesDB v10 release and
+linking TidesDB v10.1.1, at **beta** maturity. A 2.x minor or patch links a TidesDB v10 release and
 extends this same manual, so only a new major opens a new manual. See
 [Versioning](https://github.com/tidesdb/tidesql/blob/master/VERSIONING.md) for how the plugin and
 the library versions relate.

@@ -109,6 +109,43 @@ IF(NOT TIDESDB_INCLUDE_DIR)
   RETURN()
 ENDIF()
 
+# The library major this plugin major is paired with.  A TidesDB major opens a new on-disk format
+# line, so a plugin built against a different one would read and write a format it does not claim to
+# support -- see VERSIONING.md.  Checked here rather than left to the linker, which would bind an
+# incompatible libtidesdb happily: the soname carries the major, so the mismatch surfaces at load
+# time as a missing library, or at run time as a format the engine misreads.
+SET(TIDESQL_REQUIRED_TIDESDB_MAJOR 10)
+
+IF(NOT EXISTS "${TIDESDB_INCLUDE_DIR}/tidesdb/tidesdb_version.h")
+  MESSAGE(FATAL_ERROR
+          "TidesDB: ${TIDESDB_INCLUDE_DIR}/tidesdb/tidesdb_version.h is missing, so the library "
+          "version cannot be read.  TideSQL requires TidesDB v${TIDESQL_REQUIRED_TIDESDB_MAJOR}.x; "
+          "a release that old predates it.  Install a current TidesDB or point TIDESDB_ROOT at one.")
+ENDIF()
+
+FILE(STRINGS "${TIDESDB_INCLUDE_DIR}/tidesdb/tidesdb_version.h" _tdb_version_line
+     REGEX "^#define[ \t]+TIDESDB_VERSION[ \t]+\"[0-9]+\\.[0-9]+\\.[0-9]+\"")
+STRING(REGEX REPLACE ".*\"([0-9]+\\.[0-9]+\\.[0-9]+)\".*" "\\1" TIDESDB_VERSION "${_tdb_version_line}")
+
+IF(NOT TIDESDB_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  MESSAGE(FATAL_ERROR
+          "TidesDB: could not read TIDESDB_VERSION from "
+          "${TIDESDB_INCLUDE_DIR}/tidesdb/tidesdb_version.h.")
+ENDIF()
+
+STRING(REGEX REPLACE "^([0-9]+)\\..*" "\\1" TIDESDB_VERSION_MAJOR "${TIDESDB_VERSION}")
+
+IF(NOT TIDESDB_VERSION_MAJOR EQUAL TIDESQL_REQUIRED_TIDESDB_MAJOR)
+  MESSAGE(FATAL_ERROR
+          "TidesDB version mismatch: found v${TIDESDB_VERSION} at ${TIDESDB_INCLUDE_DIR}, but this "
+          "TideSQL pairs with TidesDB v${TIDESQL_REQUIRED_TIDESDB_MAJOR}.x.  A different library "
+          "major is a different on-disk format, so the two cannot be mixed.  Install TidesDB "
+          "v${TIDESQL_REQUIRED_TIDESDB_MAJOR}.x, or use the TideSQL release that pairs with "
+          "v${TIDESDB_VERSION_MAJOR}.x -- the pairing is recorded in VERSIONING.md.")
+ENDIF()
+
+MESSAGE(STATUS "TidesDB: v${TIDESDB_VERSION} (major ${TIDESDB_VERSION_MAJOR}, as required)")
+
 INCLUDE_DIRECTORIES(${TIDESDB_INCLUDE_DIR})
 
 # The compression backends are optional.  The library encodes with NONE when it is

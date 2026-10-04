@@ -17,10 +17,17 @@ than in engine code. The capabilities MySQL does and does not offer an engine
 are listed in **What MySQL offers the engine** below, and a change to that list
 versions like any other change to the public surface.
 
-## TideSQL 2.0.0 pairs with TidesDB v10.0.1
+## TideSQL 2.0.0 pairs with TidesDB v10.1.1
+
+The pairing is enforced at build time, not left to the operator: the plugin's
+CMake reads `TIDESDB_VERSION` from the installed `tidesdb/tidesdb_version.h` and
+refuses to configure against a library whose major is not the one this TideSQL
+major pairs with. The linker would not catch it -- the soname carries the major,
+so a mismatch surfaces later as a missing library at load, or as a format the
+engine misreads.
 
 Each TideSQL release links exactly one TidesDB release and stores data in that
-library's on-disk format. TideSQL 2.0.0 links TidesDB v10.0.1 and writes the
+library's on-disk format. TideSQL 2.0.0 links TidesDB v10.1.1 and writes the
 v10 format line. The plugin version and the library version keep their own
 cadence, so the pairing is recorded here and surfaced at runtime through the
 `tidesdb_version` status variable for the plugin and `tidesdb_library_version`
@@ -89,9 +96,9 @@ format line.
 
 | TideSQL | TidesDB library | On-disk format | Rollback boundary            |
 |---------|-----------------|----------------|------------------------------|
-| 2.0.0   | 10.0.1          | 10             | any TideSQL linking format 10 |
+| 2.0.0   | 10.1.1          | 10             | any TideSQL linking format 10 |
 
-- **TideSQL 2.0.0 writes the v10 format line** by linking TidesDB v10.0.1. It
+- **TideSQL 2.0.0 writes the v10 format line** by linking TidesDB v10.1.1. It
   reads only the v10 format, so a database created by an earlier release line
   does not open in place and no in-place migration ships for that step. A
   database from an earlier release moves across by dumping with `mysqldump` and
