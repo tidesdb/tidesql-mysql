@@ -40,11 +40,15 @@
 #  ./install.sh [OPTIONS]
 #
 # Options:
-#   --tidesdb-version VERSION   TidesDB release tag        (default: latest from GitHub)
+#   --tidesdb-version VERSION   TidesDB release tag        (default: the paired release)
 #   --mysql-version   VERSION   MySQL branch or tag        (default: latest from GitHub)
 #   --tidesdb-prefix  DIR       TidesDB install prefix     (default: platform-dependent)
 #   --mysql-prefix    DIR       MySQL install prefix       (default: platform-dependent)
 #   --build-dir       DIR       Working directory          (default: platform-dependent)
+#   --mysql-src       DIR       Use this MySQL source tree instead of cloning one.  The tree must be
+#                               the same version as the server the plugin will load into: a storage
+#                               engine records the server's MYSQL_VERSION_ID and the server refuses
+#                               a plugin whose id differs, patch releases included.
 #   --jobs            N         Parallel build jobs        (default: auto-detected)
 #   --skip-deps                 Skip system dependency installation
 #   --skip-tidesdb              Skip TidesDB library build (use if already installed)
@@ -52,7 +56,6 @@
 #   --list-engines              List storage engines that can be skipped and exit
 #   --rebuild-plugin             Rebuild only the TidesDB plugin (fast dev cycle)
 #   --pgo                       Enable Profile-Guided Optimization (3-phase build)
-#   --s3                        Build TidesDB with S3 object store connector (requires libcurl)
 #   --allocator  NAME           Memory allocator for libtidesdb.so: system (default), jemalloc, mimalloc, or tcmalloc.
 #                               Only affects TidesDB's internal allocations; mysqld's allocator is unchanged.
 #                               For a process-wide swap also LD_PRELOAD the allocator at mysqld startup.
@@ -143,12 +146,18 @@ _fetch_url() {
     fi
 }
 
+# The TidesDB release this TideSQL is paired with and tested against.  Pinned rather than resolved
+# to whatever is newest: a TideSQL release stores data in one library's on-disk format, and the
+# pairing is part of what the version means -- see VERSIONING.md.  --tidesdb-version overrides it
+# for trying a different library, and the plugin's CMake still refuses a different major.
+TIDESDB_PINNED_VERSION="v10.1.1"
+
 get_latest_tidesdb_version() {
     local version
     version=$(_fetch_url "https://api.github.com/repos/tidesdb/tidesdb/releases/latest" \
         | grep '"tag_name":' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
     if [[ -z "$version" ]]; then
-        echo "10.0.0"  # fallback, TidesDB 10.x tags drop the leading v
+        echo "${TIDESDB_PINNED_VERSION}"
     else
         echo "$version"
     fi
@@ -177,6 +186,7 @@ get_latest_mysql_version() {
 
 TIDESDB_VERSION=""
 MYSQL_VERSION=""
+MYSQL_SRC=""
 TIDESDB_PREFIX="${DEFAULT_TIDESDB_PREFIX}"
 MYSQL_PREFIX="${DEFAULT_MYSQL_PREFIX}"
 BUILD_DIR="${DEFAULT_BUILD_DIR}"
@@ -186,7 +196,6 @@ SKIP_TIDESDB=false
 REBUILD_PLUGIN=false
 PGO_ENABLED=false
 SKIP_ENGINES=""
-WITH_S3=false
 # Memory allocator to build libtidesdb against.  One of:
 #   system     glibc / platform default (no extra dep)
 #   jemalloc   routes TidesDB allocations through jemalloc (pkg: libjemalloc-dev)
@@ -291,7 +300,6 @@ while [[ $# -gt 0 ]]; do
         --skip-engines)     SKIP_ENGINES="$2";      shift 2 ;;
         --list-engines)     list_engines ;;
         --pgo)              PGO_ENABLED=true;       shift   ;;
-        --s3)               WITH_S3=true;           shift   ;;
         --allocator)
             ALLOCATOR="$2"
             case "$ALLOCATOR" in
@@ -299,15 +307,27 @@ while [[ $# -gt 0 ]]; do
                 *) die "--allocator must be one of system|jemalloc|mimalloc|tcmalloc (got '$ALLOCATOR')" ;;
             esac
             shift 2 ;;
+        --mysql-src)        MYSQL_SRC="$2";         shift 2 ;;
         --help|-h)          usage ;;
         *) die "Unknown option: $1 (try --help)" ;;
     esac
 done
 
-# Resolve versions (fetch from GitHub if not specified) 
+# The MySQL source tree: the one the caller named, or the one this script clones.
+MYSQL_SRC_GIVEN=false
+if [[ -n "$MYSQL_SRC" ]]; then
+    [[ -d "$MYSQL_SRC" ]] || die "--mysql-src: no such directory: ${MYSQL_SRC}"
+    [[ -f "$MYSQL_SRC/sql/mysqld.cc" ]] || die "--mysql-src: ${MYSQL_SRC} is not a MySQL source tree"
+    MYSQL_SRC_GIVEN=true
+else
+    MYSQL_SRC="${BUILD_DIR}/mysql-server"
+fi
+
+# Resolve versions.  TidesDB defaults to the release this TideSQL is paired with; MySQL defaults
+# to the newest, since the plugin tracks the server rather than pinning it.
 if [[ -z "$TIDESDB_VERSION" ]]; then
-    info "Fetching latest TidesDB version from GitHub..."
-    TIDESDB_VERSION="$(get_latest_tidesdb_version)"
+    TIDESDB_VERSION="${TIDESDB_PINNED_VERSION}"
+    info "TidesDB: using the paired release ${TIDESDB_VERSION} (override with --tidesdb-version)"
 fi
 if [[ -z "$MYSQL_VERSION" ]]; then
     info "Fetching latest MySQL version from GitHub..."
@@ -549,11 +569,6 @@ build_tidesdb() {
         -DBUILD_SHARED_LIBS=ON
     )
 
-    if $WITH_S3; then
-        cmake_args+=(-DTIDESDB_WITH_S3=ON)
-        info "S3 object store connector enabled"
-    fi
-
     case "$ALLOCATOR" in
         jemalloc)
             cmake_args+=(-DTIDESDB_WITH_JEMALLOC=ON)
@@ -615,17 +630,19 @@ build_tidesdb() {
 
 # Clone MySQL and copy TidesDB storage engine 
 prepare_mysql() {
-    info "Cloning MySQL (branch/tag: ${MYSQL_VERSION})..."
+    local mysql_src="${MYSQL_SRC}"
 
-    local mysql_src="${BUILD_DIR}/mysql-server"
-
-    if [[ -d "${mysql_src}" ]]; then
-        info "Removing previous MySQL source..."
-        rm -rf "${mysql_src}"
+    if $MYSQL_SRC_GIVEN; then
+        info "Using the MySQL source tree at ${mysql_src} (not cloning)"
+    else
+        info "Cloning MySQL (branch/tag: ${MYSQL_VERSION})..."
+        if [[ -d "${mysql_src}" ]]; then
+            info "Removing previous MySQL source..."
+            rm -rf "${mysql_src}"
+        fi
+        git clone --depth 1 --branch "${MYSQL_VERSION}" \
+            https://github.com/mysql/mysql-server.git "${mysql_src}"
     fi
-
-    git clone --depth 1 --branch "${MYSQL_VERSION}" \
-        https://github.com/mysql/mysql-server.git "${mysql_src}"
 
     info "Copying TidesDB storage engine plugin into MySQL source..."
     cp -R "${SCRIPT_DIR}/tidesdb" "${mysql_src}/storage/"
@@ -646,7 +663,7 @@ prepare_mysql() {
 build_mysql() {
     info "Building MySQL with InnoDB + TidesDB..."
 
-    local mysql_src="${BUILD_DIR}/mysql-server"
+    local mysql_src="${MYSQL_SRC}"
     local mysql_build="${mysql_src}/build"
 
     mkdir -p "${mysql_build}"
@@ -669,11 +686,6 @@ build_mysql() {
         -DWITH_BOOST="${mysql_src}/extra/boost"
         -DWITH_UNIT_TESTS=OFF
     )
-
-    # S3 object store connector for the plugin
-    if $WITH_S3; then
-        cmake_args+=(-DTIDESDB_WITH_S3=ON)
-    fi
 
     # Disable skipped engines
     if [[ -n "$SKIP_ENGINES" ]]; then
@@ -723,7 +735,7 @@ build_mysql() {
 install_mysql() {
     info "Installing MySQL to ${MYSQL_PREFIX}..."
 
-    local mysql_build="${BUILD_DIR}/mysql-server/build"
+    local mysql_build="${MYSQL_SRC}/build"
     local build_config="RelWithDebInfo"
     if $PGO_ENABLED; then
         build_config="Release"
@@ -1049,7 +1061,7 @@ ${mysqld_safe_section}"
     local mysqld_bin=""
     for candidate in \
         "${MYSQL_PREFIX}/bin/mysqld" \
-        "${BUILD_DIR}/mysql-server/build/runtime_output_directory/mysqld"; do
+        "${MYSQL_SRC}/build/runtime_output_directory/mysqld"; do
         if [[ -x "$candidate" ]]; then
             mysqld_bin="$candidate"
             break
@@ -1117,7 +1129,7 @@ ${mysqld_safe_section}"
 print_summary() {
     local cnf_name="my.cnf"
     local start_cmd="${MYSQL_PREFIX}/bin/mysqld-safe"
-    local test_dir="${BUILD_DIR}/mysql-server/build/mysql-test"
+    local test_dir="${MYSQL_SRC}/build/mysql-test"
 
     # Use the correct connect user, root for system installs, current user otherwise
     local connect_user="root"
@@ -1190,7 +1202,7 @@ print_summary() {
 
 # Rebuild only the TidesDB plugin (fast dev cycle) 
 rebuild_plugin() {
-    local mysql_src="${BUILD_DIR}/mysql-server"
+    local mysql_src="${MYSQL_SRC}"
     local mysql_build="${mysql_src}/build"
 
     if [[ ! -d "${mysql_build}" ]]; then
@@ -1215,14 +1227,6 @@ rebuild_plugin() {
 
     # Point cmake at the TidesDB library
     export TIDESDB_ROOT="${TIDESDB_PREFIX}"
-
-    # Sync the S3 setting with the current --s3 flag so cached builds
-    # don't keep a stale TIDESDB_WITH_S3 value from a previous configure.
-    if $WITH_S3; then
-        cmake "${mysql_build}" -DTIDESDB_WITH_S3=ON
-    else
-        cmake "${mysql_build}" -DTIDESDB_WITH_S3=OFF
-    fi
 
     # Build just the plugin target
     info "Building tidesdb plugin target (${JOBS} jobs)..."
@@ -1278,7 +1282,7 @@ rebuild_plugin() {
 pgo_instrument() {
     info "PGO Phase 1/3: Building MySQL with profiling instrumentation..."
 
-    local mysql_src="${BUILD_DIR}/mysql-server"
+    local mysql_src="${MYSQL_SRC}"
     local mysql_build="${mysql_src}/build"
     local profile_dir="${BUILD_DIR}/pgo-profiles"
 
@@ -1362,7 +1366,7 @@ pgo_instrument() {
 pgo_train() {
     info "PGO Phase 2/3: Running TidesDB test suite to generate profile data..."
 
-    local mysql_src="${BUILD_DIR}/mysql-server"
+    local mysql_src="${MYSQL_SRC}"
     local mtr_dir="${mysql_src}/build/mysql-test"
 
     if [[ ! -f "${mtr_dir}/mtr" ]]; then
@@ -1403,7 +1407,7 @@ pgo_train() {
 pgo_optimize() {
     info "PGO Phase 3/3: Rebuilding MySQL with profile-guided optimizations..."
 
-    local mysql_src="${BUILD_DIR}/mysql-server"
+    local mysql_src="${MYSQL_SRC}"
     local mysql_build="${mysql_src}/build"
     local profile_dir="${BUILD_DIR}/pgo-profiles"
 

@@ -10,7 +10,7 @@ library. It lets a table keep its data in a TidesDB LSM B+tree instead of InnoDB
 ordinary SQL. Switching a table from InnoDB to TidesDB is a change to the `ENGINE` clause and
 nothing more.
 
-This is the TideSQL for MySQL version 2.x manual, the storage engine for TidesDB v10.1.0, and the companion to the
+This is the TideSQL for MySQL version 2.x manual, the storage engine for TidesDB v10.1.1, and the companion to the
 [TidesDB library manual](/preface). It tracks the 2.x line as a whole, so a minor or patch release
 extends this manual rather than starting a separate one. Where this book says "the library" it means TidesDB, and
 where it needs to explain a storage behavior in depth it points at the library manual rather than

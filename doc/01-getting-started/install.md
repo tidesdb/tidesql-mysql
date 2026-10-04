@@ -35,12 +35,12 @@ The flags worth knowing:
 | `--mysql-version VERSION` | MySQL branch or tag; defaults to the latest on GitHub |
 | `--tidesdb-prefix DIR`, `--mysql-prefix DIR` | Where each is installed |
 | `--build-dir DIR` | Working directory for the build |
+| `--mysql-src DIR` | Build against a MySQL source tree you already have, instead of cloning one |
 | `--jobs N` | Parallel build jobs; auto-detected otherwise |
 | `--skip-deps`, `--skip-tidesdb` | Skip dependency installation, or the library build if it is already installed |
 | `--skip-engines ENGINES` | Comma-separated engines to leave out of the server; `--list-engines` shows what can be skipped |
 | `--rebuild-plugin` | Rebuild only the plugin against an existing server build, for a fast edit-build-test cycle |
 | `--allocator NAME` | Allocator for `libtidesdb`: `system` (default), `jemalloc`, `mimalloc` or `tcmalloc`. See the loading note below |
-| `--s3` | Build the library's S3 object-store connector; needs libcurl |
 | `--pgo` | Three-phase profile-guided build: instrument, train on the test suite, rebuild optimised |
 
 ```bash
@@ -50,8 +50,21 @@ The flags worth knowing:
 ```
 
 `--rebuild-plugin` needs a full run to have happened first; it reuses that build tree rather than
-configuring a new one. It does not rebuild `libtidesdb`, so a changed `--allocator` or `--s3` needs
-a full run to take effect.
+configuring a new one. It does not rebuild `libtidesdb`, so a changed `--allocator` needs a full run
+to take effect.
+
+`--mysql-src` points the build at a MySQL source tree you already have rather than cloning one, and
+combines with `--rebuild-plugin` to build only the engine against it. The tree has to be the same
+version as the server the plugin will be loaded into. A storage engine records the
+`MYSQL_VERSION_ID` it was compiled against, and the server loads only a plugin whose id matches its
+own exactly -- patch releases included, so a plugin built against 26.7.0 is refused by 26.7.1 with
+`API version for STORAGE ENGINE plugin is too different`. There is no storage-engine ABI across
+server versions to rely on.
+
+```bash
+./install.sh --rebuild-plugin --skip-deps --skip-tidesdb \
+  --mysql-src /path/to/mysql-server --mysql-prefix /usr/local/mysql
+```
 
 The rest of this page is the manual path, which is what to read if you are building against a server
 tree you already have.
