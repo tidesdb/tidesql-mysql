@@ -205,6 +205,26 @@ ldd /usr/local/lib/libtidesdb.so | grep -E 'jemalloc|mimalloc|tcmalloc'
 This is a property of how the library was built, not of the plugin, so rebuilding the plugin alone
 does not change it.
 
+### When the allocator cannot be preloaded
+
+Preloading is the right fix for a server you start yourself, but it is not always available. Running
+the test suite under a sanitizer is the case that matters: the sanitizer runtime takes the same
+initial-exec space the allocator wants, and preloading the allocator alongside it does not help,
+because a sanitizer interposes on the allocator it is trying to measure. The plugin then fails to
+load for the same reason as above, with the suite reporting every test as an unknown storage engine.
+
+Where that happens, enlarge the loader's surplus instead of reserving the allocator early:
+
+```bash
+GLIBC_TUNABLES=glibc.rtld.optional_static_tls=4096 \
+  ./mtr --suite=tidesdb,tidesdb_rpl
+```
+
+This asks the dynamic loader for more static TLS than it reserves by default, which leaves room for
+a late `dlopen` to claim some. It needs glibc 2.32 or newer, and it is a run-time setting, so it
+changes nothing about how either the library or the plugin was built. A library built with the
+default system allocator needs none of this.
+
 ## Where the data lives
 
 TidesDB data files live in a directory of their own rather than among the server's tablespaces,
