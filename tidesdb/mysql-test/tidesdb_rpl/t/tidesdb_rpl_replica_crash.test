@@ -1,4 +1,15 @@
 --source include/rpl/init_source_replica.inc
+
+# The replica is restarted here with its connection metadata already stored, so the
+# server logs MY-010897 about holding credentials in that repository.  mtr carries a
+# global suppression for it, but whether the line lands inside this test's slice of the
+# error log depends on how long the restart takes -- under a sanitizer build it does.
+# Suppressing it here makes the test independent of that timing.
+--connection slave
+--disable_query_log
+CALL mtr.add_suppression("Storing MySQL user name or password information in the connection metadata repository is not secure");
+--enable_query_log
+--connection master
 #
 # A replica killed outright, then brought back.
 #

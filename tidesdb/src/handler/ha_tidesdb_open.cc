@@ -65,17 +65,17 @@ ha_tidesdb::ha_tidesdb(handlerton *hton, TABLE_SHARE *table_arg)
 
 TidesDB_share *ha_tidesdb::get_share()
 {
-    TidesDB_share *tmp_share;
     DBUG_ENTER("ha_tidesdb::get_share");
 
     lock_shared_ha_data();
-    if (!(tmp_share = static_cast<TidesDB_share *>(get_ha_share_ptr())))
+    TidesDB_share *tmp_share = static_cast<TidesDB_share *>(get_ha_share_ptr());
+    if (!tmp_share)
     {
+        /* An allocation that failed is published to no one: the share pointer is left unset and
+           the caller gets NULL, which is what it already had to handle. */
         tmp_share = new TidesDB_share;
-        if (!tmp_share) goto err;
-        set_ha_share_ptr(static_cast<Handler_share *>(tmp_share));
+        if (tmp_share) set_ha_share_ptr(static_cast<Handler_share *>(tmp_share));
     }
-err:
     unlock_shared_ha_data();
     DBUG_RETURN(tmp_share);
 }
