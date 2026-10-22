@@ -11,14 +11,13 @@ on:
 # TIDESDB_REF is a ref on tidesdb/tidesdb, MYSQL_VERSION a tag on
 # mysql/mysql-server.  Bump them together to retarget the whole matrix.
 #
-# NOTE: TIDESDB_REF is a BRANCH, not a tag.  The library's v10 line is not
-# tagged yet -- its newest tag is v9.3.15, and 10.0.0 and 10.0.1 exist only as
-# branches -- so this pin moves under CI and a run is not reproducible from the
-# ref alone.  Each job prints the commit the branch resolved to for that reason.
-# Make this a tag once v10.0.1 is tagged.
+# TIDESDB_REF is the tag this TideSQL pairs with, so a run is reproducible from
+# the ref alone.  It matches the pin in install.sh and the pairing recorded in
+# VERSIONING.md; move all three together.  Each job still prints the commit the
+# ref resolved to.
 env:
-  TIDESDB_REF: "10.0.1"
-  MYSQL_VERSION: "mysql-9.7.0"
+  TIDESDB_REF: "v10.2.1"
+  MYSQL_VERSION: "mysql-26.7.0"
 
 jobs:
   test:
@@ -97,9 +96,25 @@ jobs:
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        # The community feed times out now and then, and a failed choco install does not
+        # fail this step on its own -- pwsh reports only the last command's exit code -- so
+        # the missing bison surfaced minutes later as configure not finding sql_yacc.h.
+        # Retry the feed, and check for each tool rather than trusting the exit codes.
         run: |
-          choco install -y winflexbison3 ninja
+          foreach ($i in 1..3) {
+            choco install -y winflexbison3 ninja
+            if (Get-Command win_bison -ErrorAction SilentlyContinue) { break }
+            Write-Host "winflexbison3 not installed (attempt $i), retrying in 30s"
+            Start-Sleep -Seconds 30
+          }
+          if (-not (Get-Command win_bison -ErrorAction SilentlyContinue)) {
+            Write-Error "win_bison is not on PATH; the server cannot generate its parser"; exit 1
+          }
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            Write-Error "ninja is not on PATH"; exit 1
+          }
           vcpkg install zstd:x64-windows lz4:x64-windows snappy:x64-windows openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { Write-Error "vcpkg install failed"; exit 1 }
 
       # The Unix jobs cache ccache; this is the same idea for MSVC.  It hooks in through
       # CMAKE_<LANG>_COMPILER_LAUNCHER, which Ninja honours and MSBuild does not, so it
@@ -108,9 +123,21 @@ jobs:
         if: runner.os == 'Windows'
         uses: mozilla-actions/sccache-action@v0.0.11
 
+      # The action only installs sccache.  Without this, sccache keeps its cache on the
+      # runner's local disk, which is discarded with the job, so every build is cold.
+      - name: Keep the sccache cache across runs (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
+      # ccache 4 defaults to ~/Library/Caches/ccache on macOS, not the ~/.cache/ccache
+      # the cache step saves, so without pinning it macOS saved nothing and built cold
+      # every run.  On Linux this is already the default.
       - name: Configure ccache (Unix)
         if: runner.os != 'Windows'
         run: |
+          export CCACHE_DIR="$HOME/.cache/ccache"
+          echo "CCACHE_DIR=$CCACHE_DIR" >> "$GITHUB_ENV"
           echo "/usr/lib/ccache:/usr/local/opt/ccache/libexec" >> "$GITHUB_PATH"
           ccache --set-config=max_size=2G
           ccache --zero-stats

@@ -73,3 +73,36 @@ For each written row the lifetime is resolved in this order, taking the first th
 2. The session `tidesdb_ttl`, when non-zero.
 3. The table-level `ttl` option, when non-zero.
 4. Otherwise the row never expires.
+
+## TTL across an UPDATE
+
+An `UPDATE` rewrites the row, so it also resolves the lifetime again, by the same order. Where
+a source applies the countdown restarts from the update: a table with `ttl=3600` keeps each row
+for an hour after its last write rather than after its insert, and a TTL column is read from
+the new row the same way it was read from the old one. A TTL column set to zero still means
+this row does not expire, so that is how an expiry is cleared.
+
+One case has no source to resolve at all: the table carries no `ttl` option and no TTL column,
+so the only thing that ever set this row's expiry was a session holding `tidesdb_ttl` at insert
+time — and the session running the `UPDATE` need not have it set. Rather than write the row back
+as permanent, the engine reads the stored deadline and carries the remaining lifetime forward,
+so the row still expires when it was going to:
+
+```sql
+CREATE TABLE sessions (id INT PRIMARY KEY, token VARCHAR(64)) ENGINE=TIDESDB;
+
+SET SESSION tidesdb_ttl = 3600;
+INSERT INTO sessions VALUES (1, 'abc');   -- expires an hour from now
+SET SESSION tidesdb_ttl = 0;
+
+UPDATE sessions SET token = 'def' WHERE id = 1;  -- still expires at the original deadline
+```
+
+On a table shaped like this, an `UPDATE` cannot remove an expiry by omission. To change one,
+give the updating session a `tidesdb_ttl`, which puts the write back on step 2.
+
+Carrying the deadline forward costs a table that never uses TTL nothing. A row an `UPDATE`
+reaches through a scan has its expiry read off the iterator as the scan passes it, with no
+extra lookup, and only in a statement that writes the table, so a `SELECT` never reads it at
+all. A row reached by an exact primary-key match, as in the example above, is fetched by point
+lookup instead, and its expiry is looked up once more when it is written back.

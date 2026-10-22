@@ -43,14 +43,26 @@ DROP TABLE t_backup;
 
 --echo #
 --echo # ============================================
---echo # TEST 2: Backup into an existing directory succeeds
+--echo # TEST 2: The destination must be absent or empty
 --echo # ============================================
 --echo #
 
---echo # TidesDB 10 writes a fresh consistent snapshot into the directory, so
---echo # re-running a backup into a directory that already holds one succeeds.
+--echo # TidesDB 10.2 refuses to write into a directory that already holds files, so a
+--echo # second backup over the first one is rejected rather than half-overwriting it.
 --disable_query_log
-eval SELECT tidesdb_backup('$backup_dir') AS backup_again;
+--replace_regex /backup to '.*' refused/backup to 'DESTINATION' refused/
+--error ER_UNKNOWN_ERROR
+eval SELECT tidesdb_backup('$backup_dir');
+--enable_query_log
+
+--echo # The first backup is still whole -- the refusal happened before anything was written.
+--file_exists $backup_dir
+
+--echo # An empty directory is a valid destination, it is only existing content that is refused.
+--force-rmdir $backup_dir
+--mkdir $backup_dir
+--disable_query_log
+eval SELECT tidesdb_backup('$backup_dir') AS backup_into_empty;
 --enable_query_log
 --echo # (succeeded -- the statement would have failed otherwise)
 

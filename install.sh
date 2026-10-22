@@ -150,7 +150,7 @@ _fetch_url() {
 # to whatever is newest: a TideSQL release stores data in one library's on-disk format, and the
 # pairing is part of what the version means -- see VERSIONING.md.  --tidesdb-version overrides it
 # for trying a different library, and the plugin's CMake still refuses a different major.
-TIDESDB_PINNED_VERSION="v10.1.1"
+TIDESDB_PINNED_VERSION="v10.2.1"
 
 get_latest_tidesdb_version() {
     local version
@@ -178,7 +178,7 @@ get_latest_mysql_version() {
         | grep -E '^mysql-[0-9]+\.[0-9]+\.[0-9]+$' \
         | sort -t- -k2 -V | tail -1)
     if [[ -z "$version" ]]; then
-        echo "mysql-9.7.0"  # fallback, the release TideSQL 2.0.0 is tested against
+        echo "mysql-26.7.0"  # fallback, the release TideSQL 2.1.0 is tested against
     else
         echo "$version"
     fi

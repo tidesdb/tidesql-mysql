@@ -342,6 +342,11 @@ static constexpr double TIDESDB_TOMBSTONE_DENSITY_DIVISOR = 10000.0;
 /* TTL sentinel value meaning no expiration */
 static constexpr time_t TIDESDB_TTL_NONE = (time_t)-1;
 
+/* Shortest duration that still expires a row.  The library reads a ttl of zero as
+   "no expiration", so a deadline already behind us is carried forward as this rather
+   than as a zero that would make the row permanent. */
+static constexpr time_t TIDESDB_TTL_MIN_SECONDS = (time_t)1;
+
 /* Default block cache size (bytes) */
 static constexpr ulonglong TIDESDB_DEFAULT_BLOCK_CACHE = 256ULL * 1024 * 1024; /* 256M */
 

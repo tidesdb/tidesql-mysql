@@ -243,6 +243,96 @@ SELECT id, val FROM t_ttl_priority ORDER BY id;
 DROP TABLE t_ttl_priority;
 
 --echo #
+--echo # ============================================
+--echo # TEST 10: UPDATE keeps an expiry no TTL source would name
+--echo # ============================================
+--echo #
+
+--echo # The table has no TTL of its own, so the only thing that set one was the session
+--echo # holding tidesdb_ttl at insert time.  A later UPDATE from a session with no TTL
+--echo # set has no source to compute from, and must carry the stored deadline forward
+--echo # rather than rewrite the row as permanent.
+
+CREATE TABLE t_ttl_keep (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=TIDESDB;
+
+SET SESSION tidesdb_ttl = 5;
+INSERT INTO t_ttl_keep VALUES (1, 'updated'), (2, 'untouched');
+SET SESSION tidesdb_ttl = 0;
+
+--echo # Row 1 is updated with no TTL in force; row 2 is the control.
+UPDATE t_ttl_keep SET val = 'updated once' WHERE id = 1;
+
+--echo # Both rows visible before the deadline
+SELECT id, val FROM t_ttl_keep ORDER BY id;
+
+--sleep 9
+
+--echo # Both expired -- the UPDATE did not extend row 1's life
+SELECT id, val FROM t_ttl_keep ORDER BY id;
+
+DROP TABLE t_ttl_keep;
+
+--echo #
+--echo # ============================================
+--echo # TEST 11: A TTL column of zero still clears an expiry
+--echo # ============================================
+--echo #
+
+--echo # Carrying a deadline forward is only for a table with no TTL of its own.  Where a
+--echo # TTL column exists it stays the row's answer, so setting it to zero on an UPDATE
+--echo # means this row no longer expires rather than keeping what it carried before.
+
+CREATE TABLE t_ttl_clear (
+  id INT PRIMARY KEY,
+  val VARCHAR(32),
+  expires INT ENGINE_ATTRIBUTE='{"ttl": true}'
+) ENGINE=TIDESDB;
+
+INSERT INTO t_ttl_clear VALUES (1, 'cleared', 5), (2, 'left set', 5);
+
+--echo # Row 1 has its TTL column zeroed; row 2 keeps its 5s and is the control.
+UPDATE t_ttl_clear SET expires = 0 WHERE id = 1;
+
+--sleep 9
+
+--echo # Row 1 survives with no expiry; row 2 expired on schedule
+SELECT id, val FROM t_ttl_clear ORDER BY id;
+
+DROP TABLE t_ttl_clear;
+
+--echo #
+--echo # ============================================
+--echo # TEST 12: The expiry survives an UPDATE driven by a scan
+--echo # ============================================
+--echo #
+
+--echo # TEST 10 updates by primary key, a point fetch.  An UPDATE whose WHERE is not on
+--echo # the key reads its rows through the scan iterator instead, which records each
+--echo # row's expiry as it passes.  Row 2 is also still a pending write of the open
+--echo # transaction when it is updated, so the expiry comes from the transaction's own
+--echo # buffered write rather than from the store.
+
+CREATE TABLE t_ttl_scan (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=TIDESDB;
+
+SET SESSION tidesdb_ttl = 5;
+INSERT INTO t_ttl_scan VALUES (1, 'committed'), (3, 'control');
+BEGIN;
+INSERT INTO t_ttl_scan VALUES (2, 'pending');
+SET SESSION tidesdb_ttl = 0;
+UPDATE t_ttl_scan SET val = CONCAT(val, ' updated') WHERE val IN ('committed', 'pending');
+COMMIT;
+
+--echo # All three visible before the deadline
+SELECT id, val FROM t_ttl_scan ORDER BY id;
+
+--sleep 9
+
+--echo # All three expired -- neither scanned update extended its row
+SELECT id, val FROM t_ttl_scan ORDER BY id;
+
+DROP TABLE t_ttl_scan;
+
+--echo #
 --echo #
 --source ../include/cleanup_tidesdb.inc
 --echo # Done.

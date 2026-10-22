@@ -33,6 +33,8 @@
  * also put the engine on a symbol mysqld does not export to plugins on Windows.  a function is not
  * called holding that mutex, so there is nothing to work around. */
 
+#include <filesystem>
+
 #include "ha_tidesdb.h"
 
 #include <cstring>
@@ -133,6 +135,38 @@ static void tdb_udf_release_own_txn(THD *thd)
     trx->fts_meta_dirty = false;
 }
 
+/**
+ * tdb_udf_dest_writable
+ * whether a backup destination satisfies the library's requirement that it be absent or empty
+ * @param path the destination named by the caller
+ * @param why out -- on refusal, the reason to show the client
+ * @return true when the copy may proceed
+ *
+ * The library refuses a destination that already holds files, so that a backup cannot be written
+ * over another one and leave a directory holding half of each.  Checked here so the caller is told
+ * which of the two reasons applies, rather than being handed the io error the library would
+ * otherwise return.
+ */
+static bool tdb_udf_dest_writable(const std::string &path, std::string &why)
+{
+    std::error_code ec;
+    const std::filesystem::path dir(path);
+
+    if (!std::filesystem::exists(dir, ec)) return true; /* absent is fine; the library creates it */
+
+    if (!std::filesystem::is_directory(dir, ec))
+    {
+        why = "the path exists and is not a directory";
+        return false;
+    }
+    if (std::filesystem::directory_iterator(dir, ec) != std::filesystem::directory_iterator())
+    {
+        why = "the directory is not empty; a backup is written only to an absent or empty path";
+        return false;
+    }
+    return true;
+}
+
 /* ******************** tidesdb_backup ******************** */
 
 extern "C" bool tidesdb_backup_udf_init(UDF_INIT *initid, UDF_ARGS *args, char *message)
@@ -154,6 +188,15 @@ extern "C" char *tidesdb_backup_udf(UDF_INIT *, UDF_ARGS *args, char *result, un
     {
         my_printf_error(ER_UNKNOWN_ERROR, "[TIDESDB] tidesdb_backup() needs a destination path",
                         MYF(0));
+        *error = 1;
+        return nullptr;
+    }
+
+    std::string why;
+    if (!tdb_udf_dest_writable(path, why))
+    {
+        my_printf_error(ER_UNKNOWN_ERROR, "[TIDESDB] backup to '%s' refused: %s", MYF(0),
+                        path.c_str(), why.c_str());
         *error = 1;
         return nullptr;
     }
@@ -194,6 +237,15 @@ extern "C" char *tidesdb_checkpoint_udf(UDF_INIT *, UDF_ARGS *args, char *result
     {
         my_printf_error(ER_UNKNOWN_ERROR, "[TIDESDB] tidesdb_checkpoint() needs a destination path",
                         MYF(0));
+        *error = 1;
+        return nullptr;
+    }
+
+    std::string why;
+    if (!tdb_udf_dest_writable(path, why))
+    {
+        my_printf_error(ER_UNKNOWN_ERROR, "[TIDESDB] checkpoint to '%s' refused: %s", MYF(0),
+                        path.c_str(), why.c_str());
         *error = 1;
         return nullptr;
     }

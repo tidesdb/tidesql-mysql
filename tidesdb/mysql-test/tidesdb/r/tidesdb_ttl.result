@@ -196,5 +196,78 @@ id	val
 2	uses_session
 DROP TABLE t_ttl_priority;
 #
+# ============================================
+# TEST 10: UPDATE keeps an expiry no TTL source would name
+# ============================================
+#
+# The table has no TTL of its own, so the only thing that set one was the session
+# holding tidesdb_ttl at insert time.  A later UPDATE from a session with no TTL
+# set has no source to compute from, and must carry the stored deadline forward
+# rather than rewrite the row as permanent.
+CREATE TABLE t_ttl_keep (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=TIDESDB;
+SET SESSION tidesdb_ttl = 5;
+INSERT INTO t_ttl_keep VALUES (1, 'updated'), (2, 'untouched');
+SET SESSION tidesdb_ttl = 0;
+# Row 1 is updated with no TTL in force; row 2 is the control.
+UPDATE t_ttl_keep SET val = 'updated once' WHERE id = 1;
+# Both rows visible before the deadline
+SELECT id, val FROM t_ttl_keep ORDER BY id;
+id	val
+1	updated once
+2	untouched
+# Both expired -- the UPDATE did not extend row 1's life
+SELECT id, val FROM t_ttl_keep ORDER BY id;
+id	val
+DROP TABLE t_ttl_keep;
+#
+# ============================================
+# TEST 11: A TTL column of zero still clears an expiry
+# ============================================
+#
+# Carrying a deadline forward is only for a table with no TTL of its own.  Where a
+# TTL column exists it stays the row's answer, so setting it to zero on an UPDATE
+# means this row no longer expires rather than keeping what it carried before.
+CREATE TABLE t_ttl_clear (
+id INT PRIMARY KEY,
+val VARCHAR(32),
+expires INT ENGINE_ATTRIBUTE='{"ttl": true}'
+) ENGINE=TIDESDB;
+INSERT INTO t_ttl_clear VALUES (1, 'cleared', 5), (2, 'left set', 5);
+# Row 1 has its TTL column zeroed; row 2 keeps its 5s and is the control.
+UPDATE t_ttl_clear SET expires = 0 WHERE id = 1;
+# Row 1 survives with no expiry; row 2 expired on schedule
+SELECT id, val FROM t_ttl_clear ORDER BY id;
+id	val
+1	cleared
+DROP TABLE t_ttl_clear;
+#
+# ============================================
+# TEST 12: The expiry survives an UPDATE driven by a scan
+# ============================================
+#
+# TEST 10 updates by primary key, a point fetch.  An UPDATE whose WHERE is not on
+# the key reads its rows through the scan iterator instead, which records each
+# row's expiry as it passes.  Row 2 is also still a pending write of the open
+# transaction when it is updated, so the expiry comes from the transaction's own
+# buffered write rather than from the store.
+CREATE TABLE t_ttl_scan (id INT PRIMARY KEY, val VARCHAR(32)) ENGINE=TIDESDB;
+SET SESSION tidesdb_ttl = 5;
+INSERT INTO t_ttl_scan VALUES (1, 'committed'), (3, 'control');
+BEGIN;
+INSERT INTO t_ttl_scan VALUES (2, 'pending');
+SET SESSION tidesdb_ttl = 0;
+UPDATE t_ttl_scan SET val = CONCAT(val, ' updated') WHERE val IN ('committed', 'pending');
+COMMIT;
+# All three visible before the deadline
+SELECT id, val FROM t_ttl_scan ORDER BY id;
+id	val
+1	committed updated
+2	pending updated
+3	control
+# All three expired -- neither scanned update extended its row
+SELECT id, val FROM t_ttl_scan ORDER BY id;
+id	val
+DROP TABLE t_ttl_scan;
+#
 #
 # Done.

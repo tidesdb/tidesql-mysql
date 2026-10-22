@@ -54,16 +54,16 @@ extern "C"
    definition so the plugin descriptor and handler::table_type() cannot disagree. */
 #define TIDESQL_ENGINE_NAME "TidesDB"
 
-#define TIDESQL_VERSION_STR "2.0.0"
+#define TIDESQL_VERSION_STR "2.1.0"
 
 /* the whole version as one number, major-minor-patch a byte each, for the tidesdb_version_hex
    status variable a caller can compare numerically. */
-#define TIDESQL_VERSION_HEX 0x020000
+#define TIDESQL_VERSION_HEX 0x020100
 
 /* the version the plugin descriptor carries.  the server renders this field as "%d.%d" of its
    high and low bytes, so it holds the major and minor only; giving it the three-byte form above
    would have it reported as 512.0 rather than 2.0. */
-#define TIDESQL_PLUGIN_VERSION 0x0200
+#define TIDESQL_PLUGIN_VERSION 0x0201
 
 /* shared compile-time constants (key/row format, spatial, fts, cost model, library defaults) */
 #include "ha_tidesdb_constants.h"
@@ -553,6 +553,17 @@ class ha_tidesdb : public handler
     bool cached_is_autocommit_;
     bool cached_stmt_shape_valid_;
 
+    /* Whether this statement writes a table that has no TTL of its own, so a row read through
+       the scan iterator records its stored expiry for update_row to carry forward.  Set at
+       lock time and false for a read, so a SELECT scan never pays for it. */
+    bool capture_row_expiry_;
+
+    /* The expiry recorded with the row last read through the scan iterator, as absolute unix
+       seconds or negative for none, and whether it belongs to that row.  A point fetch clears
+       the flag, leaving inherited_row_ttl to look the expiry up itself. */
+    time_t row_expiry_;
+    bool row_expiry_valid_;
+
     /* Cached per-statement pointers to avoid repeated hash lookups.
        Set in external_lock(lock), cleared in external_lock(F_UNLCK).
        InnoDB caches these as m_user_thd / m_prebuilt->trx. */
@@ -669,6 +680,12 @@ class ha_tidesdb : public handler
        session or table default.  Returns -1 (no expiration) or a positive
        number of seconds the row should live. */
     time_t compute_row_ttl(const uchar *buf);
+
+    /* The expiry an updated row keeps when no TTL source applies to the new write,
+       as a duration in seconds from now.  Reads the stored deadline back so an
+       UPDATE cannot quietly make an expiring row permanent.  Returns -1 (no
+       expiration) when there is nothing to preserve. */
+    time_t inherited_row_ttl(const uchar *pk, uint pk_len);
 
     /* Read current iterator entry (data-CF), decode row into buf.
        Returns 0 or HA_ERR_END_OF_FILE / HA_ERR_KEY_NOT_FOUND. */

@@ -28,12 +28,15 @@ rows_after
 DROP TABLE t_backup;
 #
 # ============================================
-# TEST 2: Backup into an existing directory succeeds
+# TEST 2: The destination must be absent or empty
 # ============================================
 #
-# TidesDB 10 writes a fresh consistent snapshot into the directory, so
-# re-running a backup into a directory that already holds one succeeds.
-backup_again
+# TidesDB 10.2 refuses to write into a directory that already holds files, so a
+# second backup over the first one is rejected rather than half-overwriting it.
+ERROR HY000: [TIDESDB] backup to 'DESTINATION' refused: the directory is not empty; a backup is written only to an absent or empty path
+# The first backup is still whole -- the refusal happened before anything was written.
+# An empty directory is a valid destination, it is only existing content that is refused.
+backup_into_empty
 OK
 # (succeeded -- the statement would have failed otherwise)
 #

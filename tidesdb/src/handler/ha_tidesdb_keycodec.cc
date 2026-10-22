@@ -279,6 +279,7 @@ bool ha_tidesdb::try_keyread_from_index(const uint8_t *ik, size_t iks, uint idx,
     uint pk_bytes = (uint)(iks - idx_col_len);
     memcpy(current_pk_buf_, pk_start, pk_bytes);
     current_pk_len_ = pk_bytes;
+    row_expiry_valid_ = false;
 
     return true;
 }

@@ -363,6 +363,7 @@ int ha_tidesdb::write_row(TDB_ROW_IN *buf)
 
     memcpy(current_pk_buf_, pk, pk_len);
     current_pk_len_ = pk_len;
+    row_expiry_valid_ = false;
 
     rc = write_maintain_indexes(buf, txn, trx, pk, pk_len, row_ttl);
     if (rc != TDB_SUCCESS)

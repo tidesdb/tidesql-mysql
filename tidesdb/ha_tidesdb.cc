@@ -692,13 +692,19 @@ static int tidesdb_init_func(void *p)
     if (srv_data_home_dir && srv_data_home_dir[0])
     {
         tdb_path = srv_data_home_dir;
-        while (!tdb_path.empty() && tdb_path.back() == '/') tdb_path.pop_back();
+        while (!tdb_path.empty() && (tdb_path.back() == FN_LIBCHAR || tdb_path.back() == '/'))
+            tdb_path.pop_back();
     }
     else
     {
+        /* The server hands the data directory through convert_dirname, which on Windows
+           rewrites every '/' to '\' and appends one, so both separators are accepted here.
+           Matching only '/' found no parent there and left the store relative to the
+           server's working directory. */
         std::string data_home(mysql_real_data_home);
-        while (!data_home.empty() && data_home.back() == '/') data_home.pop_back();
-        size_t slash_pos = data_home.rfind('/');
+        while (!data_home.empty() && (data_home.back() == FN_LIBCHAR || data_home.back() == '/'))
+            data_home.pop_back();
+        size_t slash_pos = data_home.find_last_of("/\\");
         if (slash_pos != std::string::npos)
             tdb_path = data_home.substr(0, slash_pos + 1) + "tidesdb_data";
         else

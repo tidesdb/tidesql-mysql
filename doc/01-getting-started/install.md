@@ -230,3 +230,10 @@ default system allocator needs none of this.
 TidesDB data files live in a directory of their own rather than among the server's tablespaces,
 `tidesdb_data` beside the server's data directory by default. `tidesdb_data_home_dir` sets it
 explicitly at startup. See [System Variables](/reference/system-variables).
+
+On Windows, releases before 2.1.0 did not find the parent of a backslash-separated data
+directory, and put `tidesdb_data` in the server's working directory instead. From 2.1.0 it is
+placed beside the data directory as on every other platform. A Windows install that ran an
+earlier release without `tidesdb_data_home_dir` should move its existing `tidesdb_data` there
+before starting 2.1.0, or point `tidesdb_data_home_dir` at where it is now; otherwise the
+engine starts on a new, empty store and the tables appear empty.

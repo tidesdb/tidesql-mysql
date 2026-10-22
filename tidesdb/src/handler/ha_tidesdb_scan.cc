@@ -45,6 +45,7 @@ int ha_tidesdb::rnd_init(bool scan [[maybe_unused]])
     DBUG_ENTER("ha_tidesdb::rnd_init");
 
     current_pk_len_ = 0;
+    row_expiry_valid_ = false;
     scan_dir_ = DIR_NONE;
     scan_range_valid_ = false; /* full table scan is unbounded */
 

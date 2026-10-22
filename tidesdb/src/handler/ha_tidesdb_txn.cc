@@ -850,8 +850,9 @@ int ha_tidesdb::external_lock_acquire(THD *thd)
   per statement, so without this every statement under LOCK TABLES would run with no transaction
   and hand a null handle to the first row operation it attempted.
 */
-int ha_tidesdb::start_stmt(THD *thd, thr_lock_type lock_type [[maybe_unused]])
+int ha_tidesdb::start_stmt(THD *thd, thr_lock_type lock_type)
 {
+    capture_row_expiry_ = lock_type >= TL_WRITE_ALLOW_WRITE && share && !share->has_ttl;
     return external_lock_acquire(thd);
 }
 
@@ -905,6 +906,8 @@ void ha_tidesdb::external_lock_release()
     enc_key_ver_valid_ = false;
     cached_time_valid_ = false;
     cached_thdvars_valid_ = false;
+    capture_row_expiry_ = false;
+    row_expiry_valid_ = false;
 
     stmt_txn = NULL;
     stmt_txn_dirty = false;
@@ -919,7 +922,11 @@ int ha_tidesdb::external_lock(THD *thd, int lock_type)
 {
     DBUG_ENTER("ha_tidesdb::external_lock");
 
-    if (lock_type != F_UNLCK) DBUG_RETURN(external_lock_acquire(thd));
+    if (lock_type != F_UNLCK)
+    {
+        capture_row_expiry_ = lock_type == F_WRLCK && share && !share->has_ttl;
+        DBUG_RETURN(external_lock_acquire(thd));
+    }
 
     external_lock_release();
     DBUG_RETURN(0);

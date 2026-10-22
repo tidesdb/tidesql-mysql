@@ -30,10 +30,10 @@ Three things to know before scheduling one:
   it. The database stays writable throughout.
 - **It is a copy, not a link.** Both the time it takes and the free space it needs are proportional
   to the live on-disk size.
-- **The destination is created if absent and is not required to be empty.** It must not be the live
-  data directory. Backing up into a directory that already holds files writes alongside them, which
-  leaves a directory that is a valid database plus whatever else was there — so use a fresh path
-  unless you mean to.
+- **The destination must be absent or empty.** It is created if absent, and it must not be the live
+  data directory. A path that already holds files is refused before anything is written, so a second
+  backup over an earlier one fails the statement instead of mixing the two in one directory; the
+  earlier backup is left intact. Give each backup a fresh path, or clear the directory first.
 
 It is a function rather than a setting because a backup is something the server does once, not a
 state it is in — the path is where a backup went, not how the engine is configured. A backup that

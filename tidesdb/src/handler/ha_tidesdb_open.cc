@@ -54,6 +54,7 @@ ha_tidesdb::ha_tidesdb(handlerton *hton, TABLE_SHARE *table_arg)
       scan_iter_last_err_(0), scan_iter_last_err_cf_(NULL), scan_iter_last_err_txn_(NULL),
       has_blobs_(false), encrypted_(false), record1_lo_(NULL), record1_hi_(NULL),
       cached_sql_cmd_(0), cached_is_autocommit_(false), cached_stmt_shape_valid_(false),
+      capture_row_expiry_(false), row_expiry_(TIDESDB_TTL_NONE), row_expiry_valid_(false),
       cached_thd_(NULL), cached_trx_(NULL), in_bulk_insert_(false), in_bulk_update_(false),
       in_bulk_delete_(false), bulk_insert_ops_(0), cached_compact_after_range_delete_min_rows_(0),
       bulk_delete_rows_(0), mrr_custom_active_(false), mrr_no_assoc_(false), mrr_keyno_(MAX_KEY),
